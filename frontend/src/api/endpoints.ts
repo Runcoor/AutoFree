@@ -92,4 +92,16 @@ export const accountsApi = {
     api.post(`/accounts/pending/${encodeURIComponent(email)}/manual-import`, content).then(r => r.data),
   removePending: (email: string) =>
     api.delete(`/accounts/pending/${encodeURIComponent(email)}`).then(() => null),
+  syncOne: (email: string, forceRefresh = false) =>
+    api.post<{ ok: boolean; msg: string; email: string }>(
+      `/accounts/${encodeURIComponent(email)}/sync-cpa`, null,
+      { params: { force_refresh: forceRefresh } },
+    ).then(r => r.data),
+  syncBatch: (batchId: string, forceRefresh = false) =>
+    api.post<{
+      batch_id: string; total: number; pushed: number; failed: number; skipped: number
+      results: { email: string; ok: boolean; msg: string }[]
+    }>(`/accounts/batch/${encodeURIComponent(batchId)}/sync-cpa`, null,
+      { params: { force_refresh: forceRefresh } },
+    ).then(r => r.data),
 }

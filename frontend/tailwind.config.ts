@@ -2,56 +2,88 @@ import type { Config } from 'tailwindcss'
 
 export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
+  darkMode: ['selector', '[data-theme="dark"]'],
   theme: {
     extend: {
       fontFamily: {
-        sans: [
-          '-apple-system',
-          'BlinkMacSystemFont',
-          '"SF Pro Text"',
-          '"SF Pro Display"',
-          '"Helvetica Neue"',
-          '"PingFang SC"',
-          '"Microsoft YaHei"',
-          'sans-serif',
-        ],
+        sans: ['Inter', '"Noto Sans SC"', '-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'sans-serif'],
+        mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
       },
       colors: {
-        bg: '#F5F5F7',
-        surface: '#FFFFFF',
+        // Token-mapped colors so light/dark switch via CSS vars
+        bg: 'var(--bg)',
+        'bg-elev': 'var(--bg-elev)',
+        'bg-soft': 'var(--bg-soft)',
+        line: 'var(--border)',
+        'line-strong': 'var(--border-strong)',
         ink: {
-          DEFAULT: '#1D1D1F',
-          soft: '#6E6E73',
-          muted: '#86868B',
+          DEFAULT: 'var(--text)',
+          soft: 'var(--text-muted)',
+          muted: 'var(--text-muted)',
+          faint: 'var(--text-faint)',
         },
-        accent: {
-          DEFAULT: '#007AFF',
-          hover: '#0066CC',
-          subtle: 'rgba(0, 122, 255, 0.08)',
+        brand: {
+          1: '#0072ff',
+          2: '#00c6ff',
         },
-        danger: '#FF3B30',
-        warning: '#FF9500',
-        success: '#34C759',
-        line: 'rgba(0, 0, 0, 0.06)',
+        success: '#10b981',
+        warning: '#f59e0b',
+        warn: '#f59e0b',
+        danger: '#ef4444',
+        info: '#00c6ff',
       },
       borderRadius: {
         card: '16px',
-        btn: '12px',
+        btn: '10px',
         input: '10px',
       },
       boxShadow: {
-        sm: '0 1px 3px rgba(0, 0, 0, 0.04)',
-        md: '0 4px 24px rgba(0, 0, 0, 0.06)',
-        lg: '0 12px 48px rgba(0, 0, 0, 0.10)',
+        sm: 'var(--shadow-sm)',
+        md: 'var(--shadow-md)',
+        lg: 'var(--shadow-lg)',
+        glow: '0 6px 16px rgba(0,114,255,0.30)',
+        'glow-lg': '0 10px 24px rgba(0,114,255,0.45)',
       },
-      fontSize: {
-        'display': ['36px', { lineHeight: '1.15', letterSpacing: '-0.02em', fontWeight: '700' }],
-        'title': ['22px', { lineHeight: '1.25', letterSpacing: '-0.01em', fontWeight: '600' }],
-        'body': ['17px', { lineHeight: '1.5' }],
-        'caption': ['13px', { lineHeight: '1.4', color: 'rgba(0,0,0,.55)' }],
+      backgroundImage: {
+        'brand-grad': 'linear-gradient(135deg, #0072ff 0%, #00c6ff 100%)',
+        'brand-grad-soft': 'linear-gradient(135deg, rgba(0,114,255,0.10) 0%, rgba(0,198,255,0.10) 100%)',
       },
       transitionTimingFunction: {
-        'apple': 'cubic-bezier(.25,.1,.25,1)',
+        apple: 'cubic-bezier(0.4, 0, 0.2, 1)',
+      },
+      keyframes: {
+        fadeInUp: {
+          '0%': { opacity: '0', transform: 'translateY(12px)' },
+          '100%': { opacity: '1', transform: 'translateY(0)' },
+        },
+        pageIn: {
+          '0%': { opacity: '0', transform: 'translateY(8px)' },
+          '100%': { opacity: '1', transform: 'translateY(0)' },
+        },
+        shimmer: {
+          '0%': { transform: 'translateX(-100%)' },
+          '100%': { transform: 'translateX(100%)' },
+        },
+        shine: {
+          '0%, 60%': { transform: 'translateX(-100%)' },
+          '100%': { transform: 'translateX(100%)' },
+        },
+        float: {
+          '0%, 100%': { transform: 'translate(0,0) scale(1)' },
+          '50%': { transform: 'translate(60px, 40px) scale(1.1)' },
+        },
+        pulseDot: {
+          '0%, 100%': { transform: 'scale(1)', opacity: '1' },
+          '50%': { transform: 'scale(1.5)', opacity: '0' },
+        },
+      },
+      animation: {
+        'fade-in-up': 'fadeInUp 0.5s ease both',
+        'page-in': 'pageIn 0.45s cubic-bezier(0.4,0,0.2,1) both',
+        shimmer: 'shimmer 1.6s linear infinite',
+        shine: 'shine 3s ease-in-out infinite',
+        float: 'float 24s ease-in-out infinite',
+        'pulse-dot': 'pulseDot 1.6s ease-out infinite',
       },
     },
   },

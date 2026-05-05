@@ -1,7 +1,8 @@
-"""账号 / pending 列表 + 下载 + 手动导入。"""
+"""账号 / pending 列表 + 下载 + 手动导入 + 批量重推 CPA(自动 refresh)。"""
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import logging
 from pathlib import Path
@@ -19,6 +20,10 @@ from autofree.settings import get_settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _utcnow():
+    return _dt.datetime.now(_dt.timezone.utc)
 
 
 def _serialize_account(a: Account) -> dict:
@@ -146,3 +151,84 @@ def delete_pending(
     for r in rows:
         db.delete(r)
     db.commit()
+
+
+# ─── 批次/单号 重推 CPA(推前自动 refresh)──────────────────────────────────
+
+@router.post("/{email}/sync-cpa")
+def sync_one(
+    email: str,
+    force_refresh: bool = False,
+    db: Session = Depends(get_db),
+    _user=Depends(require_user),
+) -> dict:
+    """单个账号重推 CPA — 自动 refresh access_token 后再推。"""
+    from autofree.core.cpa_push import push_auth_file
+
+    a = db.execute(select(Account).where(Account.email == email)).scalar_one_or_none()
+    if not a:
+        raise HTTPException(404, "账号不存在")
+    settings = get_settings()
+    p = (settings.output_dir / a.auth_json_path) if a.auth_json_path else None
+    if not p or not p.exists():
+        raise HTTPException(410, "本地 JSON 文件已不存在")
+
+    ok, msg = push_auth_file(p, refresh=True, force_refresh=force_refresh)
+    a.cpa_synced = ok and "未启用" not in msg
+    a.cpa_synced_at = _utcnow() if a.cpa_synced else a.cpa_synced_at
+    a.cpa_error = None if ok else msg
+    db.commit()
+    return {"ok": ok, "msg": msg, "email": email}
+
+
+@router.post("/batch/{batch_id}/sync-cpa")
+def sync_batch(
+    batch_id: str,
+    force_refresh: bool = False,
+    db: Session = Depends(get_db),
+    _user=Depends(require_user),
+) -> dict:
+    """整批账号重推 CPA — 每个账号都自动 refresh 后推。"""
+    from autofree.core.cpa_push import push_auth_file
+
+    rows = db.execute(select(Account).where(Account.batch_id == batch_id)).scalars().all()
+    if not rows:
+        raise HTTPException(404, f"batch {batch_id} 没有账号")
+
+    settings = get_settings()
+    pushed = 0
+    failed = 0
+    skipped = 0
+    results = []
+    for a in rows:
+        if not a.auth_json_path:
+            failed += 1
+            results.append({"email": a.email, "ok": False, "msg": "无 auth_json_path"})
+            continue
+        p = settings.output_dir / a.auth_json_path
+        if not p.exists():
+            failed += 1
+            results.append({"email": a.email, "ok": False, "msg": "本地 JSON 已不存在"})
+            continue
+        ok, msg = push_auth_file(p, refresh=True, force_refresh=force_refresh)
+        results.append({"email": a.email, "ok": ok, "msg": msg})
+        if "未启用" in msg:
+            skipped += 1
+        elif ok:
+            pushed += 1
+            a.cpa_synced = True
+            a.cpa_synced_at = _utcnow()
+            a.cpa_error = None
+        else:
+            failed += 1
+            a.cpa_synced = False
+            a.cpa_error = msg
+    db.commit()
+    return {
+        "batch_id": batch_id,
+        "total": len(rows),
+        "pushed": pushed,
+        "failed": failed,
+        "skipped": skipped,
+        "results": results,
+    }

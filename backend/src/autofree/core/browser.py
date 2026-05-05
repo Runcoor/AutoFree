@@ -32,10 +32,15 @@ def get_launch_options() -> dict:
     """统一的 Chromium 启动参数。
 
     默认 headless=False 与 autoteam 一致(headless 会被 Cloudflare turnstile 抓)。
-    Linux 上需要 DISPLAY 环境变量(Xvfb 或本地桌面);autoteam Docker 镜像已装 Xvfb。
-    若你确认要 headless,设 FREEGEN_HEADLESS=1。
+    Linux 上需要 DISPLAY 环境变量(Xvfb 或本地桌面);AutoFree Docker 镜像装了 Xvfb 并通过
+    xvfb-run 拉起 uvicorn,所以默认就有 DISPLAY 可用。
+    若你确认要 headless,设 FREEGEN_HEADLESS=1 或 PLAYWRIGHT_HEADLESS=true。
     """
-    headless_env = os.environ.get("FREEGEN_HEADLESS", "0").strip().lower()
+    headless_env = (
+        os.environ.get("FREEGEN_HEADLESS")
+        or os.environ.get("PLAYWRIGHT_HEADLESS")
+        or "0"
+    ).strip().lower()
     headless = headless_env in ("1", "true", "yes", "on")
     return {
         "headless": headless,

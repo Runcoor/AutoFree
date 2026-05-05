@@ -120,6 +120,40 @@ def _exchange_code(auth_code: str, code_verifier: str, fallback_email: str) -> d
     return bundle
 
 
+def refresh_access_token(refresh_token: str) -> dict | None:
+    """用 refresh_token 静默换一对新的 access/id_token — 1 次 HTTP, 无浏览器。
+
+    成功返 {access_token, refresh_token, id_token, expires_in}, 失败返 None。
+    """
+    if not refresh_token:
+        return None
+    try:
+        resp = requests.post(
+            CODEX_TOKEN_URL,
+            data={
+                "grant_type": "refresh_token",
+                "client_id": CODEX_CLIENT_ID,
+                "refresh_token": refresh_token,
+                "scope": "openid profile email",
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=30,
+        )
+    except Exception as exc:
+        logger.warning("[oauth] refresh 网络异常: %s", exc)
+        return None
+    if resp.status_code != 200:
+        logger.warning("[oauth] refresh 失败 HTTP %d: %s", resp.status_code, resp.text[:200])
+        return None
+    data = resp.json()
+    return {
+        "access_token": data.get("access_token", ""),
+        "refresh_token": data.get("refresh_token", refresh_token),
+        "id_token": data.get("id_token", ""),
+        "expires_in": int(data.get("expires_in", 3600)),
+    }
+
+
 def _inject_session_cookies(context, session_token: str) -> None:
     """把 chatgpt.com __Secure-next-auth.session-token 注入 chatgpt.com + auth.openai.com 双域。
 

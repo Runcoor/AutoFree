@@ -1,66 +1,135 @@
 import { useEffect, useState } from 'react'
-import { Trash2, Upload, X } from 'lucide-react'
+import { Trash2, KeyRound, Clock, RefreshCw, Upload, X, Check, AlertCircle } from 'lucide-react'
 import { accountsApi, type PendingAccount } from '../api/endpoints'
-import { Button, Card, CardHeader, Pill, useToast } from '../components/ui'
+import { Button, Card, CardBody, CardHeader, Pill, Textarea, useToast } from '../components/ui'
 
 export function PendingPage() {
   const [items, setItems] = useState<PendingAccount[]>([])
   const [importing, setImporting] = useState<PendingAccount | null>(null)
-  const push = useToast(s => s.push)
+  const [bulk, setBulk] = useState('')
+  const [bulkBusy, setBulkBusy] = useState(false)
+  const push = useToast((s) => s.push)
 
   useEffect(() => { refresh() }, [])
   function refresh() { accountsApi.pending().then(setItems) }
 
   async function remove(p: PendingAccount) {
-    if (!confirm(`删除 pending 账号 ${p.email}?(邮箱密码不会找回)`)) return
+    if (!confirm(`删除 pending 账号 ${p.email}？(邮箱密码不会找回)`)) return
     await accountsApi.removePending(p.email)
     push('已删除', 'success')
     refresh()
   }
 
+  async function bulkImport() {
+    let arr: any
+    try { arr = JSON.parse(bulk) } catch { return push('JSON 解析失败', 'danger') }
+    if (!Array.isArray(arr)) return push('请粘贴一个 JSON 数组', 'danger')
+    setBulkBusy(true)
+    let ok = 0, fail = 0
+    try {
+      for (const obj of arr) {
+        const email = obj?.email
+        if (!email) { fail++; continue }
+        try { await accountsApi.manualImport(email, obj); ok++ } catch { fail++ }
+      }
+      push(`导入完成 · 成功 ${ok} · 失败 ${fail}`, ok > 0 ? 'success' : 'danger')
+      if (ok > 0) { setBulk(''); refresh() }
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-display">待办</h1>
-        <p className="text-ink-soft mt-1">注册成功但 OAuth 失败的号 · 共 {items.length} 条</p>
+    <div className="page">
+      <div className="flex flex-wrap items-start justify-between gap-4 mb-7">
+        <div>
+          <h1 className="text-[32px] font-extrabold tracking-[-0.02em] leading-[1.1] m-0">待办</h1>
+          <p className="text-ink-soft text-[14px] mt-1.5">
+            注册成功但 OAuth 失败的号 · 共 {items.length} 条
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button onClick={refresh}>
+            <RefreshCw className="w-3.5 h-3.5" />
+            刷新
+          </Button>
+        </div>
       </div>
 
-      <Card>
-        <CardHeader title="待处理列表" subtitle="可手动获取 token 后,粘贴 JSON 导入" />
-        <div className="overflow-x-auto">
-          <table className="w-full text-[14px]">
-            <thead className="text-ink-soft text-[12px] uppercase tracking-wider">
-              <tr className="border-y border-line">
-                <th className="text-left font-medium px-6 py-2.5">邮箱</th>
-                <th className="text-left font-medium px-3 py-2.5">密码</th>
-                <th className="text-left font-medium px-3 py-2.5">失败原因</th>
-                <th className="text-left font-medium px-3 py-2.5">时间</th>
-                <th className="text-right font-medium px-6 py-2.5">操作</th>
+      <Card className="anim-in mb-5">
+        <CardHeader
+          title="待处理列表"
+          subtitle="可手动获取 token 后,粘贴 JSON 导入"
+          action={
+            items.length > 0 && (
+              <Pill tone="warn">
+                <AlertCircle className="w-3 h-3" />
+                需要处理
+              </Pill>
+            )
+          }
+        />
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>邮箱</th>
+                <th>密码</th>
+                <th>失败原因</th>
+                <th>时间</th>
+                <th>操作</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-line">
+            <tbody>
               {items.length === 0 && (
-                <tr><td colSpan={5} className="text-center py-12 text-ink-muted">暂无待办</td></tr>
+                <tr>
+                  <td colSpan={5}>
+                    <div className="empty-state">
+                      <div className="empty-icon"><Check size={22} /></div>
+                      暂无待办 — 所有账号 OAuth 都成功了
+                    </div>
+                  </td>
+                </tr>
               )}
-              {items.map(p => (
-                <tr key={p.id} className="hover:bg-bg/40">
-                  <td className="px-6 py-3 font-mono">{p.email}</td>
-                  <td className="px-3 py-3 font-mono text-ink-soft">{p.password}</td>
-                  <td className="px-3 py-3">
-                    <Pill tone="warning">{p.error_kind || 'unknown'}</Pill>
-                    <div className="text-caption text-ink-muted mt-1 max-w-md truncate" title={p.error}>{p.error}</div>
+              {items.map((p) => (
+                <tr key={p.id}>
+                  <td>
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-8 h-8 rounded-[8px] grid place-items-center shrink-0" style={{ background: 'rgba(245,158,11,0.15)', color: 'var(--warn)' }}>
+                        <Clock className="w-3.5 h-3.5" />
+                      </div>
+                      <span className="mono text-[13px] truncate max-w-[240px]" title={p.email}>{p.email}</span>
+                    </div>
                   </td>
-                  <td className="px-3 py-3 text-ink-soft">
-                    {p.created_at ? new Date(p.created_at).toLocaleString('zh-CN') : '—'}
+                  <td>
+                    <span className="mono text-[13px]">{p.password}</span>
                   </td>
-                  <td className="px-6 py-3 text-right">
-                    <div className="inline-flex gap-1">
-                      <Button variant="ghost" onClick={() => setImporting(p)}>
-                        <Upload className="w-3.5 h-3.5" /> 导入 JSON
-                      </Button>
-                      <Button variant="ghost" onClick={() => remove(p)}>
-                        <Trash2 className="w-3.5 h-3.5" /> 删除
-                      </Button>
+                  <td>
+                    <Pill tone="warn">{p.error_kind || 'unknown'}</Pill>
+                    <div className="text-[12px] text-ink-faint mt-1.5 max-w-md truncate" title={p.error}>
+                      {p.error}
+                    </div>
+                  </td>
+                  <td className="text-ink-soft">{p.created_at ? new Date(p.created_at).toLocaleString('zh-CN') : '—'}</td>
+                  <td>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{ padding: '6px 12px', fontSize: 12 }}
+                        onClick={() => setImporting(p)}
+                      >
+                        <KeyRound className="w-3 h-3" />
+                        导入 Token
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-icon"
+                        onClick={() => remove(p)}
+                        title="删除"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
                     </div>
                   </td>
                 </tr>
@@ -68,6 +137,31 @@ export function PendingPage() {
             </tbody>
           </table>
         </div>
+      </Card>
+
+      <Card className="anim-in" style={{ animationDelay: '80ms' }}>
+        <CardHeader
+          icon={<Upload size={18} />}
+          title="批量导入 JSON"
+          subtitle="粘贴一个数组,每个对象包含 email 和完整的 codex auth JSON"
+        />
+        <CardBody>
+          <Textarea
+            rows={6}
+            value={bulk}
+            onChange={(e) => setBulk(e.target.value)}
+            placeholder={'[\n  { "email": "...", "access_token": "...", "refresh_token": "...", ... },\n  ...\n]'}
+          />
+          <div className="flex justify-end gap-2 mt-3">
+            <Button onClick={() => setBulk('')} disabled={!bulk}>
+              清空
+            </Button>
+            <Button variant="primary" onClick={bulkImport} loading={bulkBusy} disabled={!bulk.trim()}>
+              <Check className="w-3.5 h-3.5" />
+              导入并同步
+            </Button>
+          </div>
+        </CardBody>
       </Card>
 
       {importing && (
@@ -86,7 +180,7 @@ function ImportModal({ pending, onClose, onDone }: {
 }) {
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
-  const push = useToast(s => s.push)
+  const push = useToast((s) => s.push)
 
   async function submit() {
     let json: any
@@ -105,25 +199,31 @@ function ImportModal({ pending, onClose, onDone }: {
   }
 
   return (
-    <div className="fixed inset-0 z-40 grid place-items-center px-4 bg-black/30" onClick={onClose}>
-      <div className="card w-full max-w-[600px] p-6" onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-3">
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="card-header">
           <div>
-            <div className="text-title">导入认证 JSON</div>
-            <div className="text-caption text-ink-muted mt-1">{pending.email}</div>
+            <h3>导入认证 JSON</h3>
+            <div className="sub mono">{pending.email}</div>
           </div>
-          <button onClick={onClose} className="p-2 rounded hover:bg-line/40"><X className="w-4 h-4" /></button>
+          <button onClick={onClose} className="btn btn-ghost btn-icon" aria-label="关闭">
+            <X className="w-4 h-4" />
+          </button>
         </div>
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          rows={12}
-          placeholder='{"access_token":"...","refresh_token":"...","id_token":"...","email":"...",...}'
-          className="input-base font-mono text-[13px] leading-relaxed"
-        />
-        <div className="mt-4 flex justify-end gap-2">
-          <Button variant="secondary" onClick={onClose}>取消</Button>
-          <Button onClick={submit} loading={busy}>导入</Button>
+        <div className="card-body">
+          <Textarea
+            rows={12}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder={'{"access_token":"...","refresh_token":"...","id_token":"...","email":"...",...}'}
+          />
+          <div className="flex justify-end gap-2 mt-4">
+            <Button onClick={onClose}>取消</Button>
+            <Button variant="primary" onClick={submit} loading={busy}>
+              <Check className="w-3.5 h-3.5" />
+              导入
+            </Button>
+          </div>
         </div>
       </div>
     </div>

@@ -19,7 +19,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DATA_DIR=/app/data \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
-# Playwright Chromium 系统依赖
+# Playwright Chromium 系统依赖 + Xvfb (Cloudflare turnstile 抓 headless,所以默认非 headless 跑虚拟显示器)
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl \
       libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
@@ -27,6 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 \
       libcairo2 libasound2 libatspi2.0-0 \
       fonts-liberation fonts-noto-cjk \
+      xvfb xauth dbus-x11 \
     && rm -rf /var/lib/apt/lists/*
 
 # uv (快速 python 包管理器)
@@ -52,4 +53,6 @@ VOLUME ["/app/data"]
 
 EXPOSE 8000
 
-CMD ["uv", "run", "uvicorn", "autofree.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# xvfb-run: 给非 headless Chromium 一个虚拟 X server
+CMD ["xvfb-run", "-a", "--server-args=-screen 0 1280x800x24", \
+     "uv", "run", "uvicorn", "autofree.main:app", "--host", "0.0.0.0", "--port", "8000"]

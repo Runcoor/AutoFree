@@ -1,37 +1,54 @@
 import { useEffect, useRef, useState } from 'react'
-import { Play, Square, RotateCcw } from 'lucide-react'
-import { domainsApi, freegenApi, type Batch, type FreegenStatus } from '../api/endpoints'
-import { Button, Card, CardBody, CardHeader, Input, Pill, ProgressRing, useToast } from '../components/ui'
+import { Play, Square, RefreshCw, Filter, Sparkles, Check, Cloud, Pause } from 'lucide-react'
+import { accountsApi, domainsApi, freegenApi, type Batch, type FreegenStatus } from '../api/endpoints'
+import { Button, Card, CardBody, CardHeader, LiveDot, Pill, ProgressBar, useToast } from '../components/ui'
 
 interface SseEvent { ts: number; stage: string; [k: string]: any }
 
+const PRESETS = [10, 30, 50, 100]
+
 export function BatchPage() {
-  const [count, setCount] = useState(5)
+  const [count, setCount] = useState(50)
   const [domain, setDomain] = useState('')
   const [domains, setDomains] = useState<string[]>([])
   const [status, setStatus] = useState<FreegenStatus | null>(null)
   const [history, setHistory] = useState<Batch[]>([])
   const [busy, setBusy] = useState(false)
-  const push = useToast(s => s.push)
+  const push = useToast((s) => s.push)
   const evtRef = useRef<EventSource | null>(null)
 
-  // 初始拉一次 status + domain 池 + history
-  useEffect(() => {
-    refreshAll()
-  }, [])
+  useEffect(() => { refreshAll() }, [])
 
   async function refreshAll() {
     const [doms, st, hist] = await Promise.all([
-      domainsApi.list().then(rs => rs.filter(d => d.enabled).map(d => d.domain)),
-      freegenApi.status(),
+      domainsApi.list().then((rs) => rs.filter((d) => d.enabled).map((d) => d.domain)),
+      freegenApi.status().catch(() => ({} as FreegenStatus)),
       freegenApi.batches(20),
     ])
     setDomains(doms)
-    setStatus(Object.keys(st).length === 0 ? null : st)
+    setStatus(st && Object.keys(st).length === 0 ? null : st)
     setHistory(hist)
   }
 
-  // 如果有任务在跑且 stage 不是终态,挂 SSE
+  const [pushingBatch, setPushingBatch] = useState<string | null>(null)
+  async function pushBatch(b: Batch) {
+    if (b.status !== 'finished' && b.status !== 'stopped') {
+      push('只能推送已完成 / 已停止的批次', 'danger')
+      return
+    }
+    setPushingBatch(b.id)
+    try {
+      const r = await accountsApi.syncBatch(b.id)
+      const tone = r.failed === 0 ? 'success' : r.pushed > 0 ? 'neutral' : 'danger'
+      push(`批次 ${b.id} · 共 ${r.total},推 ${r.pushed},失败 ${r.failed},跳过 ${r.skipped}`, tone as any)
+    } catch (err: any) {
+      push(err?.response?.data?.detail || '推送失败', 'danger')
+    } finally {
+      setPushingBatch(null)
+    }
+  }
+
+  // Hook SSE if a task is live
   useEffect(() => {
     if (!status?.task_id) return
     if (['finished', 'stopped', 'failed'].includes(status.stage || '')) return
@@ -51,12 +68,9 @@ export function BatchPage() {
     es.addEventListener('close', () => {
       es.close()
       evtRef.current = null
-      freegenApi.status().then(s => setStatus(Object.keys(s).length === 0 ? null : s))
+      freegenApi.status().then((s) => setStatus(Object.keys(s).length === 0 ? null : s))
       freegenApi.batches(20).then(setHistory)
     })
-    es.onerror = () => {
-      // 自动重连由浏览器 EventSource 处理
-    }
 
     return () => { es.close(); evtRef.current = null }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -65,7 +79,7 @@ export function BatchPage() {
   function mergeEvent(e: MessageEvent) {
     try {
       const data: SseEvent = JSON.parse(e.data)
-      setStatus(prev => {
+      setStatus((prev) => {
         const events = [...(prev?.events || []), data].slice(-50)
         const next = { ...(prev || {}), events, stage: data.stage }
         if (data.stage === 'account_started' && data.email) {
@@ -87,7 +101,7 @@ export function BatchPage() {
     setBusy(true)
     try {
       const r = await freegenApi.start(count, domain || undefined)
-      push(`已启动批次 #${r.batch_id} (域名 @${r.domain}, ${r.count} 个号)`, 'success')
+      push(`已启动批次 ${r.batch_id} · @${r.domain} · ${r.count} 个号`, 'success')
       const st = await freegenApi.status()
       setStatus(st)
     } catch (err: any) {
@@ -100,131 +114,283 @@ export function BatchPage() {
   async function stop() {
     try {
       await freegenApi.stop()
-      push('已请求停止,当前账号结束后停止', 'neutral')
+      push('已请求停止 · 当前账号结束后停止', 'neutral')
     } catch (err: any) {
       push(err?.response?.data?.detail || '停止失败', 'danger')
     }
   }
 
   const running = !!status?.task_id && !['finished', 'stopped', 'failed'].includes(status.stage || '')
+  const total = status?.total || count
+  const done = (status?.ok || 0) + (status?.failed || 0)
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-display">注册批次</h1>
-        <p className="text-ink-soft mt-1">配置数量与域名,启动一次串行批量注册</p>
+    <div className="page">
+      <div className="flex flex-wrap items-start justify-between gap-4 mb-7">
+        <div>
+          <h1 className="text-[32px] font-extrabold tracking-[-0.02em] leading-[1.1] m-0">注册批次</h1>
+          <p className="text-ink-soft text-[14px] mt-1.5">配置数量与域名 · 启动一次串行批量注册</p>
+        </div>
       </div>
 
-      <Card>
-        <CardHeader title="新建批次" subtitle={running ? '已有任务在运行,请先等待结束或停止' : '选择域名与数量,点击开始'} />
-        <CardBody>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <Input
-              label="数量"
-              type="number"
-              min={1}
-              max={200}
-              value={count}
-              onChange={(e) => setCount(Math.max(1, Math.min(200, Number(e.target.value) || 1)))}
-              disabled={running}
-            />
-            <div className="md:col-span-2">
-              <span className="label-base">域名(留空 = 自动轮询选用启用域名)</span>
+      {/* New batch */}
+      <Card className="mb-5 anim-in relative">
+        <div
+          className="absolute inset-0 grad-bg-soft pointer-events-none transition-opacity duration-300"
+          style={{ opacity: running ? 1 : 0 }}
+        />
+        <CardHeader
+          title={
+            <span className="flex items-center gap-2.5">
+              <span className="grad-text inline-flex items-center"><Sparkles size={18} /></span>
+              新建批次
+            </span>
+          }
+          subtitle={running ? '已有任务在运行 · 请等待结束或先停止' : '选择域名与数量 · 点击开始'}
+          action={
+            running && (
+              <Pill tone="info">
+                <LiveDot tone="info" />
+                正在注册
+              </Pill>
+            )
+          }
+        />
+        <CardBody className="relative">
+          <div className="grid gap-4 grid-cols-1 md:grid-cols-[1fr_1fr_auto]">
+            <div className="field">
+              <div className="flex items-center justify-between gap-2 min-h-[18px]">
+                <label className="!m-0">数量</label>
+                <div className="flex flex-wrap gap-1">
+                  {PRESETS.map((n) => (
+                    <button
+                      key={n}
+                      type="button"
+                      className={
+                        'px-2 h-[22px] rounded-full border text-[11.5px] font-medium transition ' +
+                        (count === n
+                          ? 'grad-bg text-white border-transparent shadow-glow'
+                          : 'bg-bg-soft border-line text-ink-soft hover:text-ink hover:border-line-strong')
+                      }
+                      onClick={() => setCount(n)}
+                      disabled={running}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className="btn btn-icon !w-[42px] !h-[42px]"
+                  onClick={() => setCount(Math.max(1, count - 5))}
+                  disabled={running}
+                  aria-label="减少"
+                >
+                  −
+                </button>
+                <input
+                  className="input mono text-center font-bold !text-[16px]"
+                  type="number"
+                  min={1}
+                  max={500}
+                  value={count}
+                  onChange={(e) => setCount(Math.max(1, Math.min(500, +e.target.value || 1)))}
+                  disabled={running}
+                />
+                <button
+                  type="button"
+                  className="btn btn-icon !w-[42px] !h-[42px]"
+                  onClick={() => setCount(Math.min(500, count + 5))}
+                  disabled={running}
+                  aria-label="增加"
+                >
+                  +
+                </button>
+              </div>
+            </div>
+
+            <div className="field">
+              <label className="min-h-[18px]">域名（留空 = 自动轮询启用域名）</label>
               <select
+                className="select"
                 value={domain}
                 onChange={(e) => setDomain(e.target.value)}
                 disabled={running}
-                className="input-base"
               >
                 <option value="">自动选择 (轮询)</option>
-                {domains.map(d => <option key={d} value={d}>@{d}</option>)}
+                {domains.map((d) => (
+                  <option key={d} value={d}>@{d}</option>
+                ))}
               </select>
-              {domains.length === 0 && (
-                <span className="text-caption text-warning mt-1.5 block">域名池为空,请先到设置页添加</span>
+            </div>
+
+            <div className="field">
+              <label className="min-h-[18px] opacity-0 select-none" aria-hidden>·</label>
+              {running ? (
+                <Button variant="danger" onClick={stop} className="!h-[42px] !px-5 whitespace-nowrap">
+                  <Square className="w-3.5 h-3.5" />
+                  停止
+                </Button>
+              ) : (
+                <Button
+                  variant="primary"
+                  onClick={start}
+                  loading={busy}
+                  disabled={domains.length === 0}
+                  className="!h-[42px] !px-6 whitespace-nowrap"
+                >
+                  <Play className="w-3.5 h-3.5" />
+                  开始注册
+                </Button>
               )}
             </div>
           </div>
-          <div className="mt-5 flex gap-3">
-            <Button onClick={start} loading={busy} disabled={running || domains.length === 0}>
-              <Play className="w-4 h-4" /> 开始注册
-            </Button>
-            {running && (
-              <Button variant="danger" onClick={stop}>
-                <Square className="w-3.5 h-3.5" /> 停止
-              </Button>
-            )}
-          </div>
+          {domains.length === 0 && !running && (
+            <div className="text-[12px] text-warn mt-2">域名池为空 · 请先到设置页添加</div>
+          )}
+
+          {(running || done > 0) && (
+            <div className="mt-5">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[13px] text-ink-soft">实时进度</span>
+                <span className="mono text-[13px] font-bold grad-text">
+                  {done} / {total}
+                </span>
+              </div>
+              <ProgressBar value={done} total={total || 1} />
+              {status?.current_email && (
+                <div className="mt-2 text-[12px] text-ink-soft">
+                  当前: <span className="mono text-ink">{status.current_email}</span>
+                </div>
+              )}
+            </div>
+          )}
         </CardBody>
       </Card>
 
-      {status?.task_id && <CurrentTaskCard status={status} />}
+      {/* Live event stream when running */}
+      {running && status && <EventStreamCard status={status} />}
 
-      <Card>
+      {/* History */}
+      <Card className="anim-in" style={{ animationDelay: '80ms' }}>
         <CardHeader
           title="历史批次"
-          action={<Button variant="ghost" onClick={refreshAll}><RotateCcw className="w-3.5 h-3.5" /> 刷新</Button>}
+          subtitle={`${history.length} 个批次`}
+          action={
+            <div className="flex gap-2">
+              <Button variant="ghost" disabled>
+                <Filter className="w-3.5 h-3.5" />
+                筛选
+              </Button>
+              <Button variant="ghost" onClick={refreshAll}>
+                <RefreshCw className="w-3.5 h-3.5" />
+                刷新
+              </Button>
+            </div>
+          }
         />
-        <div className="px-2 pb-2">
-          {history.length === 0
-            ? <div className="px-4 py-8 text-center text-ink-muted">暂无批次</div>
-            : (
-              <ul className="divide-y divide-line">
-                {history.map(b => (
-                  <li key={b.id} className="px-4 py-3 flex items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="font-mono text-[13px]">{b.id}</div>
-                      <div className="text-caption text-ink-muted">
-                        @{b.domain} · 计划 {b.count} · {b.created_at ? new Date(b.created_at).toLocaleString('zh-CN') : ''}
-                      </div>
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>批次 ID</th>
+                <th>数量</th>
+                <th>域名</th>
+                <th>结果</th>
+                <th>状态</th>
+                <th>时间</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {history.length === 0 && (
+                <tr>
+                  <td colSpan={7}>
+                    <div className="empty-state">
+                      <div className="empty-icon"><Sparkles size={22} /></div>
+                      暂无批次 — 上方启动一个新批次开始
                     </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <Pill tone="success">{b.ok}</Pill>
-                      {b.failed > 0 && <Pill tone="danger">{b.failed}</Pill>}
-                      <Pill tone={b.status === 'finished' ? 'success' : b.status === 'running' ? 'accent' : 'neutral'}>
-                        {b.status}
+                  </td>
+                </tr>
+              )}
+              {history.map((b) => (
+                <tr key={b.id}>
+                  <td className="mono font-semibold">{b.id}</td>
+                  <td>{b.count}</td>
+                  <td className="text-ink-soft mono">@{b.domain}</td>
+                  <td>
+                    <span className="text-success font-semibold">{b.ok}</span>
+                    <span className="text-ink-faint"> · </span>
+                    <span className={(b.failed ? 'text-danger' : 'text-ink-faint') + ' font-semibold'}>{b.failed}</span>
+                  </td>
+                  <td>
+                    {b.status === 'running' ? (
+                      <Pill tone="info">
+                        <LiveDot tone="info" />
+                        运行中
                       </Pill>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
+                    ) : b.status === 'finished' ? (
+                      <Pill tone="success">
+                        <Check className="w-3 h-3" />
+                        完成
+                      </Pill>
+                    ) : b.status === 'stopped' ? (
+                      <Pill tone="muted">
+                        <Pause className="w-3 h-3" />
+                        已停止
+                      </Pill>
+                    ) : (
+                      <Pill tone="muted">{b.status}</Pill>
+                    )}
+                  </td>
+                  <td className="text-ink-soft">{relTime(b.created_at)}</td>
+                  <td>
+                    <button
+                      className="btn btn-ghost"
+                      style={{ padding: '6px 10px', fontSize: 12 }}
+                      onClick={() => pushBatch(b)}
+                      disabled={pushingBatch === b.id || b.ok === 0}
+                      title={b.ok === 0 ? '该批次没有成功的账号可推' : '自动 refresh 后整批推到 CPA'}
+                    >
+                      {pushingBatch === b.id
+                        ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        : <Cloud className="w-3.5 h-3.5" />}
+                      推 CPA
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </Card>
     </div>
   )
 }
 
-function CurrentTaskCard({ status }: { status: FreegenStatus }) {
-  const total = status.total || 0
-  const done = (status.ok || 0) + (status.failed || 0)
+function EventStreamCard({ status }: { status: FreegenStatus }) {
   const events = (status.events || []).slice(-20).reverse()
-  const isFinal = ['finished', 'stopped', 'failed'].includes(status.stage || '')
-
   return (
-    <Card>
+    <Card className="mb-5 anim-in" style={{ animationDelay: '40ms' }}>
       <CardHeader
-        title="当前任务"
-        subtitle={status.task_id ? `task_id=${status.task_id}` : ''}
-        action={<Pill tone={isFinal ? (status.stage === 'finished' ? 'success' : 'neutral') : 'accent'}>{status.stage}</Pill>}
+        title="事件流"
+        subtitle={status.task_id ? `task=${status.task_id.slice(0, 12)}…` : ''}
+        action={
+          <Pill tone="info">
+            <LiveDot tone="info" />
+            实时
+          </Pill>
+        }
       />
       <CardBody>
-        <div className="flex items-center gap-6 mb-5">
-          <ProgressRing value={done} total={total} label={<>{done}<span className="text-ink-muted">/{total}</span></>} />
-          <div className="space-y-1.5 text-[15px]">
-            <div><Pill tone="success">成功 {status.ok || 0}</Pill> <Pill tone="danger">失败 {status.failed || 0}</Pill></div>
-            {status.current_email && (
-              <div className="text-ink-soft">当前: <span className="font-mono text-ink">{status.current_email}</span></div>
-            )}
-          </div>
-        </div>
-
-        <div className="text-[13px] font-medium text-ink-soft mb-2">事件流</div>
-        <div className="bg-bg/70 rounded-input px-3 py-2 max-h-[280px] overflow-y-auto font-mono text-[12px] leading-relaxed">
-          {events.length === 0 && <div className="text-ink-muted">暂无事件</div>}
+        <div className="bg-bg-soft border border-line rounded-[12px] px-3 py-2.5 max-h-[280px] overflow-y-auto mono text-[12px] leading-relaxed">
+          {events.length === 0 && <div className="text-ink-faint py-1">等待事件…</div>}
           {events.map((e, i) => (
-            <div key={i} className="flex gap-2 py-0.5">
-              <span className="text-ink-muted shrink-0">{new Date(e.ts * 1000).toLocaleTimeString('zh-CN')}</span>
-              <span className={`shrink-0 ${e.ok === false ? 'text-danger' : e.ok ? 'text-success' : 'text-accent'}`}>
+            <div key={i} className="flex gap-2.5 py-0.5">
+              <span className="text-ink-faint shrink-0">{new Date(e.ts * 1000).toLocaleTimeString('zh-CN')}</span>
+              <span className={`shrink-0 font-semibold ${e.ok === false ? 'text-danger' : e.ok ? 'text-success' : 'text-brand-1'}`}>
                 {e.stage}
               </span>
               <span className="text-ink truncate">{e.email || e.error || e.msg || ''}</span>
@@ -234,4 +400,14 @@ function CurrentTaskCard({ status }: { status: FreegenStatus }) {
       </CardBody>
     </Card>
   )
+}
+
+function relTime(iso: string | null): string {
+  if (!iso) return '—'
+  const diff = Date.now() - new Date(iso).getTime()
+  if (diff < 60_000) return '刚刚'
+  if (diff < 3600_000) return `${Math.floor(diff / 60_000)} 分钟前`
+  if (diff < 86_400_000) return `${Math.floor(diff / 3600_000)} 小时前`
+  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`
+  return new Date(iso).toLocaleDateString('zh-CN')
 }
