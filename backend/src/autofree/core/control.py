@@ -1,6 +1,6 @@
 """freegen 流程的协作式中断信号。
 
-进程级单 batch (autoteam._playwright_lock 已串行化),module-level Event 够用。
+进程级单 batch(全局 _lock 已串行化),module-level Event 够用。
 - API `POST /api/freegen/stop` 调 request_stop()
 - batch.run_batch 启动时 reset_stop(),账号之间检查 is_stop_requested()
 - oauth._solve_phone_gate 在重试间隙 + 内层 SMS 轮询里检查 → 立即 cancel/ban order 退款

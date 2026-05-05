@@ -7,6 +7,7 @@ import { DashboardPage } from './pages/DashboardPage'
 import { BatchPage } from './pages/BatchPage'
 import { AccountsPage } from './pages/AccountsPage'
 import { PendingPage } from './pages/PendingPage'
+import { CpaPage } from './pages/CpaPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { ToastContainer } from './components/ui'
 
@@ -40,6 +41,7 @@ export default function App() {
           <Route path="batch" element={<BatchPage />} />
           <Route path="accounts" element={<AccountsPage />} />
           <Route path="pending" element={<PendingPage />} />
+          <Route path="cpa" element={<CpaPage />} />
           <Route path="settings" element={<SettingsPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/dashboard" replace />} />

@@ -25,11 +25,37 @@ def _run_migrations() -> None:
     command.upgrade(cfg, "head")
 
 
+def _reap_orphan_batches() -> None:
+    """启动时把所有 status=running 的 Batch 标 stopped。
+
+    上次进程被 kill / 容器重启 → 进程内的 thread 没了,但 DB 里那行还卡在 running,
+    UI 会永久显示「运行中」且新批次启动会被「已有任务在运行」拦住。
+    """
+    import datetime as _dt
+    from sqlalchemy import select
+    from autofree.db.base import SessionLocal
+    from autofree.db.models import Batch
+
+    with SessionLocal() as db:
+        orphans = db.execute(select(Batch).where(Batch.status == "running")).scalars().all()
+        if not orphans:
+            return
+        now = _dt.datetime.now(_dt.timezone.utc)
+        for b in orphans:
+            logger.warning("[bootstrap] 修复孤儿 running 批次 %s (started=%s) → stopped",
+                           b.id, b.started_at)
+            b.status = "stopped"
+            b.finished_at = now
+        db.commit()
+        logger.info("[bootstrap] 已修复 %d 个孤儿批次", len(orphans))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     settings.ensure_dirs()
     _run_migrations()
+    _reap_orphan_batches()
     # bootstrap 用户密码(从 .env 读 APP_PASSWORD,首启写 User 表)
     from autofree.auth.bootstrap import bootstrap_password
 

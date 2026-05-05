@@ -4,7 +4,7 @@
 不需要 silent step-0 / NextAuth refresh / 双域 cookie 注入这些 Team→Personal
 翻转的复杂逻辑。
 
-- CLIENT_ID / AUTH_URL / TOKEN_URL / REDIRECT_URI 与 codex CLI 官方一致(从 autoteam.codex_auth 抄)
+- CLIENT_ID / AUTH_URL / TOKEN_URL / REDIRECT_URI 与 codex CLI 官方一致
 - bundle 输出:{access_token, refresh_token, id_token, account_id, email, plan_type, expires_at}
 """
 
@@ -56,8 +56,8 @@ def _build_auth_url(challenge: str, state: str) -> str:
     # 在 auth domain 自然 mint workspace 到 OAuth session, 根治 no_valid_organizations.
     # 参考: tmp/oauthService.js:182 (JS 参考实现, 已知能 work).
     #
-    # autoteam 用 prompt=consent + 失败时 stage-2 fresh re-login 兜底; 我们既然每次都是新号,
-    # 直接 prompt=login 一步到位, 省掉 stage-2 的 250 行复杂度.
+    # 历史方案曾用 prompt=consent + 失败时 stage-2 fresh re-login 兜底;
+    # 既然每次都是新号, 直接 prompt=login 一步到位, 省掉 stage-2 的 250 行复杂度.
     params = {
         "client_id": CODEX_CLIENT_ID,
         "code_challenge": challenge,
@@ -270,6 +270,136 @@ def _login_form_walk(page, email: str, password: str, mail_client, mail_baseline
             time.sleep(5)
     except Exception as exc:
         logger.debug("[oauth] OAuth OTP 表单异常(无要求): %s", exc)
+
+
+def _login_form_walk_email_only(page, email: str, mail_client, mail_baseline_id: int) -> None:
+    """走 auth.openai.com /log-in 表单 — 只用 email + 邮件 OTP,不需要密码。
+
+    流程:
+    1) 填 email → Continue
+    2) 等下一步出现:可能直接是 code 输入框(理想),也可能是 password 页
+    3) 若到了 password 页,找「Continue with code」/「Use a temporary code」之类的按钮切换到 OTP
+    4) 拿 cloud-mail OTP 填进去 → Continue
+
+    任何一步失败都抛 OAuthFailed,带明确原因。
+    """
+    # 1) 填 email + 继续
+    try:
+        for attempt in range(2):
+            ei = page.locator('input[name="email"], input[id="email-input"], input[id="email"]').first
+            if not ei.is_visible(timeout=5000):
+                break
+            ei.fill(email)
+            time.sleep(0.5)
+            click_primary_button(page, ei, ["Continue", "继续"])
+            time.sleep(3)
+            if not is_google_redirect(page):
+                break
+            logger.warning("[oauth-email-only] 邮箱步骤误跳 Google,重试 (attempt %d)", attempt + 1)
+            page.go_back(wait_until="domcontentloaded", timeout=30000)
+            time.sleep(2)
+    except Exception as exc:
+        raise OAuthFailed(f"填 email 阶段异常: {exc}") from exc
+
+    # 2) 等下一步 — code 输入框直接出现 = 理想路径
+    code_locator = 'input[name="code"], input[autocomplete="one-time-code"]'
+    pwd_locator = 'input[name="password"], input[type="password"]'
+
+    code_ready = False
+    try:
+        ci = page.locator(code_locator).first
+        if ci.is_visible(timeout=8000):
+            code_ready = True
+            logger.info("[oauth-email-only] 邮箱直达 OTP 步骤(无密码页)")
+    except Exception:
+        pass
+
+    # 3) 没直接到 code 步,看是否到了 password 页 — 找「用验证码登录」的切换按钮
+    if not code_ready:
+        try:
+            pi = page.locator(pwd_locator).first
+            if pi.is_visible(timeout=2000):
+                logger.info("[oauth-email-only] 进了密码页 — 找「用验证码登录」按钮")
+                # 多种文案 / 不同 UI 版本
+                switch_selectors = [
+                    # 当前 OpenAI 的真实文案(2026-05 实测)
+                    'button:has-text("Log in with a one-time code")',
+                    'a:has-text("Log in with a one-time code")',
+                    '*[role="button"]:has-text("Log in with a one-time code")',
+                    # 历史 / 其它语言 / 兼容性兜底
+                    'button:has-text("Continue with code")',
+                    'button:has-text("Use a one-time code")',
+                    'button:has-text("Send a code")',
+                    'button:has-text("Email a code")',
+                    'a:has-text("Continue with code")',
+                    'a:has-text("Use a one-time code")',
+                    'a:has-text("Send a code")',
+                    'button:has-text("使用验证码")',
+                    'button:has-text("用验证码登录")',
+                    'button:has-text("一次性")',
+                    'a:has-text("使用验证码")',
+                    'a:has-text("用验证码登录")',
+                    'a:has-text("一次性")',
+                    # 兜底:任何含 "one-time" 的可点元素
+                    'button:has-text("one-time")',
+                    'a:has-text("one-time")',
+                    '[data-testid*="code-login"]',
+                    '[data-testid*="passwordless"]',
+                ]
+                clicked = False
+                for sel in switch_selectors:
+                    try:
+                        btn = page.locator(sel).first
+                        if btn.is_visible(timeout=500):
+                            try:
+                                btn.scroll_into_view_if_needed(timeout=2000)
+                            except Exception:
+                                pass
+                            btn.click()
+                            clicked = True
+                            logger.info("[oauth-email-only] 点了切换按钮 sel=%s", sel)
+                            time.sleep(3)
+                            break
+                    except Exception:
+                        continue
+                if not clicked:
+                    safe_screenshot(page, SCREENSHOT_DIR / "oauth_email_only_no_switch.png")
+                    raise OAuthFailed(
+                        "该账号要求密码登录,且页面没有「用验证码」入口 — "
+                        "请改用「待办」页的「继续验证」(需要密码)或手动导入 token。"
+                    )
+                # 切换后再等 code 输入框
+                ci = page.locator(code_locator).first
+                if ci.is_visible(timeout=10000):
+                    code_ready = True
+        except OAuthFailed:
+            raise
+        except Exception as exc:
+            raise OAuthFailed(f"识别登录步骤失败: {exc}") from exc
+
+    if not code_ready:
+        safe_screenshot(page, SCREENSHOT_DIR / "oauth_email_only_no_code_step.png")
+        raise OAuthFailed("填 email 后既没出 code 框也没出 password 页 — 页面可能 stalled,见截图")
+
+    # 4) 等邮件 OTP 并填
+    logger.info("[oauth-email-only] 等待 cloud-mail OTP (after_id=%d)", mail_baseline_id)
+    try:
+        _, otp = mail_client.wait_for_otp(
+            email, after_id=mail_baseline_id, timeout=EMAIL_POLL_TIMEOUT,
+        )
+    except Exception as exc:
+        raise OAuthFailed(f"cloud-mail 取 OTP 超时: {exc}") from exc
+
+    try:
+        ci = page.locator(code_locator).first
+        ci.fill(otp)
+        time.sleep(0.5)
+        page.locator(
+            'button:has-text("Continue"), button:has-text("继续"), button[type="submit"]',
+        ).first.click()
+        time.sleep(5)
+    except Exception as exc:
+        raise OAuthFailed(f"填 OTP 失败: {exc}") from exc
 
 
 _PHONE_INPUT_SELECTORS = (
@@ -827,9 +957,9 @@ def _solve_phone_gate(page) -> bool:
     )
 
 
-# consent 页 Continue 按钮 — 直接复刻 autoteam/codex_auth.py:1382-1394 的成熟做法。
+# consent 页 Continue 按钮 — 沿用过去半年验证过的 selector 方案。
 # 用 Playwright 单 locator 多文本(逗号 = OR), .first 拿第一个匹配, has-text 自动忽略
-# 大小写 + 空白. 实测过去半年这套 selector 在 team 路径上稳定工作, 不要再过度设计.
+# 大小写 + 空白. 实测在 team 路径上稳定工作, 不要再过度设计.
 #
 # 之前自己写了 12 个 :not(:has-text("with")) 嵌套, Playwright 对 :not(:has-text())
 # 支持有限, 经常匹配到非 submit 的隐藏 button — 看似点击成功但 form 没提交.
@@ -843,7 +973,7 @@ _CONSENT_BUTTON_LOCATOR = (
 def _click_consent_button(page, *, after_workspace_pick: bool = False) -> bool:
     """点 consent 页面的 Continue/Authorize 按钮,返回是否点中了。
 
-    复刻 autoteam 的简单做法:单 locator + 多文本 OR + .first.click() + sleep(5).
+    简单做法:单 locator + 多文本 OR + .first.click() + sleep(5).
     Playwright .click() 自带 actionability 等待, sleep 5s 给浏览器跑完
     consent → /authorize → /callback → localhost:1455 整条 redirect 链.
     """
@@ -891,13 +1021,21 @@ def _consent_step(page) -> bool:
     return _click_consent_button(page)
 
 
-def fetch_personal_bundle(*, email: str, password: str, mail_client, session_token: str | None = None) -> dict:
+def fetch_personal_bundle(
+    *,
+    email: str,
+    password: str | None = None,
+    mail_client,
+    session_token: str | None = None,
+) -> dict:
     """跑一遍 personal codex OAuth,返回 bundle dict。失败抛 OAuthFailed。
 
     session_token: 注册阶段抽出的 chatgpt.com __Secure-next-auth.session-token。
     传入则注入到 chatgpt.com + auth.openai.com 双域,先 goto chatgpt.com 触发 silent step-0,
     然后 goto auth_url 时 OAuth backend 看到已有会话直接进 consent,跳过 /log-in →
     避开 add-phone 风控(刚注册的 personal 走 /log-in 大概率撞)。
+
+    password=None → 走「邮箱 OTP-only」登录(对纯手动添加的号,只需要 email + cloud-mail)。
     """
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
     code_verifier, code_challenge = _pkce()
@@ -954,10 +1092,21 @@ def fetch_personal_bundle(*, email: str, password: str, mail_client, session_tok
         try:
             page.goto(auth_url, wait_until="domcontentloaded", timeout=60000)
             time.sleep(3)
+
+            # auth.openai.com 经常先显示 Cloudflare turnstile,等它过完再找登录表单
+            # 否则 input[name=email] 一直找不到,会直接走到 stalled 错误
+            from autofree.core.browser import wait_cloudflare
+            cf_ok = wait_cloudflare(page, max_wait_seconds=90)
+            if not cf_ok:
+                logger.warning("[oauth] auth.openai.com Cloudflare 90s 内未通过 — 可能 IP 信誉问题")
             safe_screenshot(page, SCREENSHOT_DIR / "oauth_01_auth_page.png")
 
             # prompt=login 强制走 /log-in, 必然要填表
-            _login_form_walk(page, email, password, mail_client, mail_baseline_id)
+            if password:
+                _login_form_walk(page, email, password, mail_client, mail_baseline_id)
+            else:
+                # email-only 模式:无密码,从 cloud-mail 取 OTP
+                _login_form_walk_email_only(page, email, mail_client, mail_baseline_id)
             safe_screenshot(page, SCREENSHOT_DIR / "oauth_02_after_login.png")
 
             # add-phone gate:先尝试 5sim 解锁,解不开才 raise RegisterBlocked
@@ -968,7 +1117,7 @@ def fetch_personal_bundle(*, email: str, password: str, mail_client, session_tok
 
             assert_not_blocked(page, "oauth_post_login")
 
-            # consent loop:最多 8 轮 — 复刻 autoteam/codex_auth.py:1382 的成熟做法.
+            # consent loop:最多 8 轮 — 沿用经验证过的成熟做法.
             # auth_code 主要靠 page.on(request/response/framenavigated) 三个 hook 抓取
             # localhost:1455/auth/callback?code=... 的 redirect; URL polling 用 _live_url
             # 兜底 (page.url 偶发 stale, 之前 phone gate 已踩过).

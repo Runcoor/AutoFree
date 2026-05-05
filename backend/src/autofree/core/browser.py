@@ -31,7 +31,7 @@ _DUPLICATE_TEXT_HINTS = (
 def get_launch_options() -> dict:
     """统一的 Chromium 启动参数。
 
-    默认 headless=False 与 autoteam 一致(headless 会被 Cloudflare turnstile 抓)。
+    默认 headless=False(headless 模式会被 Cloudflare turnstile 抓)。
     Linux 上需要 DISPLAY 环境变量(Xvfb 或本地桌面);AutoFree Docker 镜像装了 Xvfb 并通过
     xvfb-run 拉起 uvicorn,所以默认就有 DISPLAY 可用。
     若你确认要 headless,设 FREEGEN_HEADLESS=1 或 PLAYWRIGHT_HEADLESS=true。

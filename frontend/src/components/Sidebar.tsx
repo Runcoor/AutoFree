@@ -1,6 +1,6 @@
 import { NavLink } from 'react-router-dom'
 import {
-  LayoutGrid, Rocket, Users, Inbox, Settings as SettingsIcon, LogOut, Sun, Moon,
+  LayoutGrid, Rocket, Users, Inbox, Settings as SettingsIcon, LogOut, Sun, Moon, Cloud,
 } from 'lucide-react'
 import clsx from 'clsx'
 import { useAuth } from '../store/auth'
@@ -25,6 +25,7 @@ const items: readonly NavItem[] = [
   { to: '/batch', label: '注册批次', icon: Rocket, key: 'batches' },
   { to: '/accounts', label: '账号', icon: Users, key: 'accounts' },
   { to: '/pending', label: '待办', icon: Inbox, key: 'pending', accent: true },
+  { to: '/cpa', label: 'CPA 全景', icon: Cloud, key: 'cpa' },
   { to: '/settings', label: '设置', icon: SettingsIcon, key: 'settings' },
 ]
 

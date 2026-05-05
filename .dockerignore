@@ -10,7 +10,6 @@
 **/*.log
 **/.env
 **/.env.local
-docker/
 freegen_*
 *.sqlite*
 *.db

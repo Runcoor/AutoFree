@@ -54,12 +54,12 @@ def write_auth_json(bundle: dict, *, output_dir: Path | None = None) -> Path:
     return path
 
 
-def append_account_line(*, email: str, password: str, account_id: str, plan_type: str, output_dir: Path | None = None) -> Path:
-    """追加 1 行到 accounts.txt(用 `|` 分隔)。"""
+def append_account_line(*, email: str, password: str | None, account_id: str, plan_type: str, output_dir: Path | None = None) -> Path:
+    """追加 1 行到 accounts.txt(用 `|` 分隔)。password=None 写空串(email-only 登录场景)。"""
     out_dir = output_dir or OUTPUT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / "accounts.txt"
-    line = "|".join([email, password, account_id, plan_type, _utc_iso(time.time())])
+    line = "|".join([email, password or "", account_id or "", plan_type or "", _utc_iso(time.time())])
     with path.open("a", encoding="utf-8") as f:
         f.write(line + "\n")
     logger.info("[storage] 追加账号: %s (%s)", email, plan_type)
@@ -82,7 +82,7 @@ def append_pending_account(
     """注册成功但 OAuth 失败的号写到 pending 列表(全局,非 per-batch)。
 
     之后用户可以:
-      a) 用 autoteam 的 Codex OAuth 登录手动跑认证(邮箱密码已知)
+      a) 在「待办」页点「继续验证」让系统重跑 OAuth + phone gate
       b) 在 UI 直接上传 JSON 内容,写到 manual_auth/<email>.json
     """
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

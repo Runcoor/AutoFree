@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { Play, Square, RefreshCw, Filter, Sparkles, Check, Cloud, Pause } from 'lucide-react'
-import { accountsApi, domainsApi, freegenApi, type Batch, type FreegenStatus } from '../api/endpoints'
+import { Play, Square, RefreshCw, Filter, Sparkles, Check, Cloud, Pause, Trash2, ChevronDown, AlertCircle, Clock, ChevronRight, Terminal } from 'lucide-react'
+import { accountsApi, domainsApi, freegenApi, type Batch, type BatchDetail, type FreegenStatus } from '../api/endpoints'
 import { Button, Card, CardBody, CardHeader, LiveDot, Pill, ProgressBar, useToast } from '../components/ui'
 
 interface SseEvent { ts: number; stage: string; [k: string]: any }
@@ -31,6 +31,11 @@ export function BatchPage() {
   }
 
   const [pushingBatch, setPushingBatch] = useState<string | null>(null)
+  const [deletingBatch, setDeletingBatch] = useState<string | null>(null)
+  const [expandedBatch, setExpandedBatch] = useState<string | null>(null)
+  const [details, setDetails] = useState<Record<string, BatchDetail | 'loading'>>({})
+  const [logExpanded, setLogExpanded] = useState(false)
+
   async function pushBatch(b: Batch) {
     if (b.status !== 'finished' && b.status !== 'stopped') {
       push('只能推送已完成 / 已停止的批次', 'danger')
@@ -41,12 +46,90 @@ export function BatchPage() {
       const r = await accountsApi.syncBatch(b.id)
       const tone = r.failed === 0 ? 'success' : r.pushed > 0 ? 'neutral' : 'danger'
       push(`批次 ${b.id} · 共 ${r.total},推 ${r.pushed},失败 ${r.failed},跳过 ${r.skipped}`, tone as any)
+      // Refresh detail so cpa_pushed counts update
+      const fresh = await freegenApi.batchDetail(b.id)
+      setDetails((d) => ({ ...d, [b.id]: fresh }))
     } catch (err: any) {
       push(err?.response?.data?.detail || '推送失败', 'danger')
     } finally {
       setPushingBatch(null)
     }
   }
+
+  async function toggleExpand(b: Batch) {
+    if (expandedBatch === b.id) {
+      setExpandedBatch(null)
+      return
+    }
+    setExpandedBatch(b.id)
+    if (!details[b.id]) {
+      setDetails((d) => ({ ...d, [b.id]: 'loading' }))
+      try {
+        const det = await freegenApi.batchDetail(b.id)
+        setDetails((d) => ({ ...d, [b.id]: det }))
+      } catch (err: any) {
+        push(err?.response?.data?.detail || '加载详情失败', 'danger')
+        setDetails((d) => { const c = { ...d }; delete c[b.id]; return c })
+      }
+    }
+  }
+
+  async function deleteBatch(b: Batch) {
+    if (b.status === 'running') {
+      push('运行中的批次不能删除', 'danger')
+      return
+    }
+    if (!confirm(`确认删除批次 ${b.id}?\n\n会一并清掉:\n· batch / 该批的成功账号 / 该批的待办\n· 硬盘上的 batch_<时间戳>/ 目录(含 auth/*.json)\n\n此操作不可撤销。`)) return
+    setDeletingBatch(b.id)
+    try {
+      await freegenApi.deleteBatch(b.id)
+      push(`已删除批次 ${b.id}`, 'success')
+      if (expandedBatch === b.id) setExpandedBatch(null)
+      setHistory((h) => h.filter((x) => x.id !== b.id))
+      setDetails((d) => { const c = { ...d }; delete c[b.id]; return c })
+    } catch (err: any) {
+      push(err?.response?.data?.detail || '删除失败', 'danger')
+    } finally {
+      setDeletingBatch(null)
+    }
+  }
+
+  // Polling 兜底 — SSE 偶尔丢 close 事件,UI 会卡住。每 4s 轮询一次 /status,
+  // 后端返 {} 或 stage in finished/stopped/failed 时同步刷新历史
+  useEffect(() => {
+    if (!status?.task_id) return
+    if (['finished', 'stopped', 'failed'].includes(status.stage || '')) return
+
+    let cancelled = false
+    const tick = async () => {
+      if (cancelled) return
+      try {
+        const fresh = await freegenApi.status()
+        const live = fresh && Object.keys(fresh).length > 0 ? fresh : null
+        // 后端没任务了 → UI 也清掉
+        if (!live) {
+          setStatus(null)
+          freegenApi.batches(20).then(setHistory).catch(() => {})
+          return
+        }
+        // 后端进了终态 → 用最新状态盖一下,顺便刷历史
+        if (['finished', 'stopped', 'failed'].includes(live.stage || '')) {
+          setStatus(live)
+          freegenApi.batches(20).then(setHistory).catch(() => {})
+          return
+        }
+        // 还在跑 — 用最新数据 merge,补 SSE 可能漏的字段
+        setStatus((prev) => ({
+          ...(prev || {}),
+          ...live,
+          // 保留 SSE 累积的事件,polling 接口 events 列表也同步过来
+          events: live.events && live.events.length > (prev?.events?.length || 0) ? live.events : prev?.events,
+        }))
+      } catch {}
+    }
+    const t = setInterval(tick, 4000)
+    return () => { cancelled = true; clearInterval(t) }
+  }, [status?.task_id, status?.stage])
 
   // Hook SSE if a task is live
   useEffect(() => {
@@ -100,8 +183,15 @@ export function BatchPage() {
     if (busy) return
     setBusy(true)
     try {
-      const r = await freegenApi.start(count, domain || undefined)
-      push(`已启动批次 ${r.batch_id} · @${r.domain} · ${r.count} 个号`, 'success')
+      let mode: 'fixed' | 'rotate' | 'random' = 'rotate'
+      let dom: string | undefined
+      if (domain === '__random__') mode = 'random'
+      else if (domain) { mode = 'fixed'; dom = domain }
+      const r = await freegenApi.start(count, dom, mode)
+      const label = mode === 'random'
+        ? `随机域名(${r.random_pool.length} 个候选)`
+        : `@${r.domain}`
+      push(`已启动批次 ${r.batch_id} · ${label} · ${r.count} 个号`, 'success')
       const st = await freegenApi.status()
       setStatus(st)
     } catch (err: any) {
@@ -212,14 +302,15 @@ export function BatchPage() {
             </div>
 
             <div className="field">
-              <label className="min-h-[18px]">域名（留空 = 自动轮询启用域名）</label>
+              <label className="min-h-[18px]">域名（轮询 = 整批同域 · 随机 = 每号一个）</label>
               <select
                 className="select"
                 value={domain}
                 onChange={(e) => setDomain(e.target.value)}
                 disabled={running}
               >
-                <option value="">自动选择 (轮询)</option>
+                <option value="">自动轮询 (整批同域)</option>
+                <option value="__random__">随机 (每号从启用域名抽)</option>
                 {domains.map((d) => (
                   <option key={d} value={d}>@{d}</option>
                 ))}
@@ -251,7 +342,7 @@ export function BatchPage() {
             <div className="text-[12px] text-warn mt-2">域名池为空 · 请先到设置页添加</div>
           )}
 
-          {(running || done > 0) && (
+          {(running || done > 0 || (status?.events?.length ?? 0) > 0) && status && (
             <div className="mt-5">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-[13px] text-ink-soft">实时进度</span>
@@ -263,15 +354,73 @@ export function BatchPage() {
               {status?.current_email && (
                 <div className="mt-2 text-[12px] text-ink-soft">
                   当前: <span className="mono text-ink">{status.current_email}</span>
+                  {status.stage && (
+                    <span className="ml-2 text-ink-faint">· stage=<span className="mono">{status.stage}</span></span>
+                  )}
                 </div>
               )}
+
+              {/* 折叠日志 */}
+              <div className="mt-3 border-t border-line pt-3">
+                <button
+                  type="button"
+                  onClick={() => setLogExpanded((v) => !v)}
+                  className="flex items-center gap-2 text-[12.5px] text-ink-soft hover:text-ink transition w-full"
+                >
+                  <ChevronRight
+                    className={
+                      'w-3.5 h-3.5 transition-transform shrink-0 ' +
+                      (logExpanded ? 'rotate-90' : '')
+                    }
+                  />
+                  <Terminal className="w-3.5 h-3.5 shrink-0" />
+                  <span>实时日志 ({status.events?.length || 0} 条事件)</span>
+                  {!logExpanded && status.events && status.events.length > 0 && (
+                    <span className="ml-auto mono text-[11.5px] text-ink-faint truncate max-w-[280px]">
+                      {(() => {
+                        const last = status.events[status.events.length - 1] as any
+                        const detail = last?.error || last?.email || last?.msg || ''
+                        return `${last?.stage || ''} ${detail}`.trim()
+                      })()}
+                    </span>
+                  )}
+                </button>
+
+                {logExpanded && (
+                  <div className="mt-2 bg-bg-soft border border-line rounded-[12px] px-3 py-2.5 max-h-[320px] overflow-y-auto mono text-[12px] leading-relaxed">
+                    {(!status.events || status.events.length === 0) && (
+                      <div className="text-ink-faint py-1">等待事件…</div>
+                    )}
+                    {(status.events || []).slice().reverse().map((e, i) => {
+                      const ev = e as any
+                      const ok = ev?.ok === true
+                      const fail = ev?.ok === false
+                      return (
+                        <div key={i} className="flex gap-2.5 py-0.5">
+                          <span className="text-ink-faint shrink-0">
+                            {new Date((ev?.ts || 0) * 1000).toLocaleTimeString('zh-CN')}
+                          </span>
+                          <span
+                            className={
+                              'shrink-0 font-semibold ' +
+                              (fail ? 'text-danger' : ok ? 'text-success' : 'text-brand-1')
+                            }
+                          >
+                            {ev?.stage}
+                          </span>
+                          <span className="text-ink truncate">
+                            {ev?.email || ev?.error || ev?.msg || ev?.cpa_msg || ''}
+                          </span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </CardBody>
       </Card>
-
-      {/* Live event stream when running */}
-      {running && status && <EventStreamCard status={status} />}
 
       {/* History */}
       <Card className="anim-in" style={{ animationDelay: '80ms' }}>
@@ -315,53 +464,92 @@ export function BatchPage() {
                   </td>
                 </tr>
               )}
-              {history.map((b) => (
-                <tr key={b.id}>
-                  <td className="mono font-semibold">{b.id}</td>
-                  <td>{b.count}</td>
-                  <td className="text-ink-soft mono">@{b.domain}</td>
-                  <td>
-                    <span className="text-success font-semibold">{b.ok}</span>
-                    <span className="text-ink-faint"> · </span>
-                    <span className={(b.failed ? 'text-danger' : 'text-ink-faint') + ' font-semibold'}>{b.failed}</span>
-                  </td>
-                  <td>
-                    {b.status === 'running' ? (
-                      <Pill tone="info">
-                        <LiveDot tone="info" />
-                        运行中
-                      </Pill>
-                    ) : b.status === 'finished' ? (
-                      <Pill tone="success">
-                        <Check className="w-3 h-3" />
-                        完成
-                      </Pill>
-                    ) : b.status === 'stopped' ? (
-                      <Pill tone="muted">
-                        <Pause className="w-3 h-3" />
-                        已停止
-                      </Pill>
-                    ) : (
-                      <Pill tone="muted">{b.status}</Pill>
-                    )}
-                  </td>
-                  <td className="text-ink-soft">{relTime(b.created_at)}</td>
-                  <td>
-                    <button
-                      className="btn btn-ghost"
-                      style={{ padding: '6px 10px', fontSize: 12 }}
-                      onClick={() => pushBatch(b)}
-                      disabled={pushingBatch === b.id || b.ok === 0}
-                      title={b.ok === 0 ? '该批次没有成功的账号可推' : '自动 refresh 后整批推到 CPA'}
+              {history.map((b) => {
+                const isExpanded = expandedBatch === b.id
+                const det = details[b.id]
+                return (
+                  <>
+                    <tr
+                      key={b.id}
+                      className="cursor-pointer"
+                      onClick={() => toggleExpand(b)}
                     >
-                      {pushingBatch === b.id
-                        ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                        : <Cloud className="w-3.5 h-3.5" />}
-                      推 CPA
-                    </button>
-                  </td>
-                </tr>
-              ))}
+                      <td>
+                        <div className="flex items-center gap-2">
+                          <ChevronDown
+                            className={
+                              'w-3.5 h-3.5 text-ink-faint transition-transform ' +
+                              (isExpanded ? 'rotate-0' : '-rotate-90')
+                            }
+                          />
+                          <span className="mono font-semibold">{b.id}</span>
+                        </div>
+                      </td>
+                      <td>{b.count}</td>
+                      <td className="text-ink-soft mono">{b.domain === 'random' ? '🎲 随机' : `@${b.domain}`}</td>
+                      <td>
+                        <span className="text-success font-semibold">{b.ok}</span>
+                        <span className="text-ink-faint"> · </span>
+                        <span className={(b.failed ? 'text-danger' : 'text-ink-faint') + ' font-semibold'}>{b.failed}</span>
+                      </td>
+                      <td>
+                        {b.status === 'running' ? (
+                          <Pill tone="info">
+                            <LiveDot tone="info" />
+                            运行中
+                          </Pill>
+                        ) : b.status === 'finished' ? (
+                          <Pill tone="success">
+                            <Check className="w-3 h-3" />
+                            完成
+                          </Pill>
+                        ) : b.status === 'stopped' ? (
+                          <Pill tone="muted">
+                            <Pause className="w-3 h-3" />
+                            已停止
+                          </Pill>
+                        ) : (
+                          <Pill tone="muted">{b.status}</Pill>
+                        )}
+                      </td>
+                      <td className="text-ink-soft">{relTime(b.created_at)}</td>
+                      <td onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            className="btn btn-ghost"
+                            style={{ padding: '6px 10px', fontSize: 12 }}
+                            onClick={() => pushBatch(b)}
+                            disabled={pushingBatch === b.id || b.ok === 0 || b.status === 'running'}
+                            title={b.ok === 0 ? '该批次没有成功的账号可推' : '自动 refresh 后整批推到 CPA'}
+                          >
+                            {pushingBatch === b.id
+                              ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                              : <Cloud className="w-3.5 h-3.5" />}
+                            推 CPA
+                          </button>
+                          <button
+                            className="btn btn-ghost btn-icon"
+                            onClick={() => deleteBatch(b)}
+                            disabled={deletingBatch === b.id || b.status === 'running'}
+                            title={b.status === 'running' ? '运行中的批次不能删除' : '删除批次 + 该批账号 + 硬盘目录'}
+                          >
+                            {deletingBatch === b.id
+                              ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                              : <Trash2 className="w-3.5 h-3.5 text-danger" />}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                    {isExpanded && (
+                      <tr>
+                        <td colSpan={7} className="!p-0">
+                          <BatchDetailPanel detail={det} batch={b} />
+                        </td>
+                      </tr>
+                    )}
+                  </>
+                )
+              })}
             </tbody>
           </table>
         </div>
@@ -370,35 +558,122 @@ export function BatchPage() {
   )
 }
 
-function EventStreamCard({ status }: { status: FreegenStatus }) {
-  const events = (status.events || []).slice(-20).reverse()
+function BatchDetailPanel({
+  detail,
+  batch,
+}: {
+  detail: BatchDetail | 'loading' | undefined
+  batch: Batch
+}) {
+  if (!detail) return null
+  if (detail === 'loading') {
+    return (
+      <div className="px-6 py-5 bg-bg-soft border-t border-line text-[13px] text-ink-soft">
+        加载详情中…
+      </div>
+    )
+  }
+
+  const { summary, accounts, pending, results } = detail
+
+  // 把 results 的每条按 ok 分类:成功(已写 account)、注册成功但 OAuth 没过(进 pending)、注册阶段就败的(没存)
+  const inAccount = new Set(accounts.map((a) => a.email))
+  const inPending = new Set(pending.map((p) => p.email))
+  const dropped = results.filter((r) => !r.ok && r.email && !inPending.has(r.email))
+
   return (
-    <Card className="mb-5 anim-in" style={{ animationDelay: '40ms' }}>
-      <CardHeader
-        title="事件流"
-        subtitle={status.task_id ? `task=${status.task_id.slice(0, 12)}…` : ''}
-        action={
-          <Pill tone="info">
-            <LiveDot tone="info" />
-            实时
-          </Pill>
-        }
-      />
-      <CardBody>
-        <div className="bg-bg-soft border border-line rounded-[12px] px-3 py-2.5 max-h-[280px] overflow-y-auto mono text-[12px] leading-relaxed">
-          {events.length === 0 && <div className="text-ink-faint py-1">等待事件…</div>}
-          {events.map((e, i) => (
-            <div key={i} className="flex gap-2.5 py-0.5">
-              <span className="text-ink-faint shrink-0">{new Date(e.ts * 1000).toLocaleTimeString('zh-CN')}</span>
-              <span className={`shrink-0 font-semibold ${e.ok === false ? 'text-danger' : e.ok ? 'text-success' : 'text-brand-1'}`}>
-                {e.stage}
-              </span>
-              <span className="text-ink truncate">{e.email || e.error || e.msg || ''}</span>
-            </div>
-          ))}
+    <div className="px-6 py-5 bg-bg-soft border-t border-line space-y-5">
+      {/* Summary chips */}
+      <div className="flex flex-wrap items-center gap-2.5 text-[12.5px]">
+        <Pill tone="muted">总数 {summary.total}</Pill>
+        <Pill tone="success">成功 {summary.ok}</Pill>
+        <Pill tone="danger">失败 {summary.failed}</Pill>
+        <Pill tone="info">CPA 已推 {summary.cpa_pushed}</Pill>
+        {summary.cpa_unpushed > 0 && (
+          <Pill tone="warn">CPA 未推 {summary.cpa_unpushed}</Pill>
+        )}
+        <Pill tone="warn">待办 {summary.pending}</Pill>
+        <span className="ml-auto text-ink-faint mono text-[11.5px]">
+          batch_id={batch.id}
+        </span>
+      </div>
+
+      {/* 成功的 account */}
+      {accounts.length > 0 && (
+        <div>
+          <div className="text-[12.5px] font-semibold text-ink-soft mb-2 flex items-center gap-2">
+            <Check className="w-3.5 h-3.5 text-success" />
+            成功账号 · {accounts.length}
+          </div>
+          <div className="bg-bg-elev border border-line rounded-[10px] divide-y divide-line">
+            {accounts.map((a) => (
+              <div key={a.email} className="flex items-center gap-3 px-3.5 py-2.5 text-[13px]">
+                <span className="mono truncate flex-1">{a.email}</span>
+                <Pill tone="muted">{a.plan_type || 'free'}</Pill>
+                {a.cpa_synced ? (
+                  <Pill tone="success"><Check className="w-3 h-3" />CPA 已推</Pill>
+                ) : a.cpa_error ? (
+                  <Pill tone="danger" className="max-w-[280px] !flex-shrink"><AlertCircle className="w-3 h-3" />{(a.cpa_error || '').slice(0, 40)}</Pill>
+                ) : (
+                  <Pill tone="warn"><Clock className="w-3 h-3" />未推</Pill>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
-      </CardBody>
-    </Card>
+      )}
+
+      {/* 进 pending 的(可继续验证) */}
+      {pending.length > 0 && (
+        <div>
+          <div className="text-[12.5px] font-semibold text-ink-soft mb-2 flex items-center gap-2">
+            <Clock className="w-3.5 h-3.5 text-warn" />
+            待办 · 注册成功但 OAuth/phone 没过 · {pending.length}
+            <span className="text-ink-faint font-normal text-[11px]">(到「待办」页可点继续验证)</span>
+          </div>
+          <div className="bg-bg-elev border border-line rounded-[10px] divide-y divide-line">
+            {pending.map((p) => (
+              <div key={p.email} className="flex items-center gap-3 px-3.5 py-2.5 text-[13px]">
+                <span className="mono truncate flex-1 max-w-[280px]" title={p.email}>{p.email}</span>
+                <Pill tone="warn">{p.error_kind || 'unknown'}</Pill>
+                <span className="text-ink-faint truncate max-w-[400px] text-[12px]" title={p.error}>
+                  {p.error}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 注册阶段就败的(邮箱删了,无法继续) */}
+      {dropped.length > 0 && (
+        <div>
+          <div className="text-[12.5px] font-semibold text-ink-soft mb-2 flex items-center gap-2">
+            <AlertCircle className="w-3.5 h-3.5 text-danger" />
+            注册阶段失败 · 邮箱已删 · {dropped.length}
+            <span className="text-ink-faint font-normal text-[11px]">(无法继续,需重起新批)</span>
+          </div>
+          <div className="bg-bg-elev border border-line rounded-[10px] divide-y divide-line">
+            {dropped.map((r, i) => (
+              <div key={`${r.email}-${i}`} className="flex items-center gap-3 px-3.5 py-2.5 text-[13px]">
+                <span className="text-ink-faint w-8">#{r.index}</span>
+                <span className="mono truncate flex-1 text-ink-soft max-w-[260px]" title={r.email}>{r.email}</span>
+                <Pill tone="muted">{r.error_kind || 'unknown'}</Pill>
+                <span className="text-ink-faint truncate max-w-[420px] text-[12px]" title={r.error}>
+                  {(r.error || '').replace(/^[a-z_]+: /, '')}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {results.length === 0 && accounts.length === 0 && pending.length === 0 && (
+        <div className="text-[13px] text-ink-faint py-2">
+          未找到该批次的 results.json — 可能批次目录已删,或太老的批次。
+        </div>
+      )}
+    </div>
   )
 }
 

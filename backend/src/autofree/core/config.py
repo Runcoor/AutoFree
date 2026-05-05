@@ -1,7 +1,7 @@
 """core 模块运行时配置 — 从 DB Setting 表读 cloud-mail / SMS / CPA 配置。
 
-历史:freegen 老版本从 env + autoteam.runtime_config 读;新版本完全切到 DB,
-env 只剩系统级(数据库 URL、应用密码、输出目录)。
+env 只剩系统级(数据库 URL、应用密码、输出目录),业务配置走 DB Setting 表,
+web 改了立即生效。
 
 模块级常量(OUTPUT_DIR / SCREENSHOT_DIR / EMAIL_POLL_*)从 autofree.settings 取。
 DB 配置(get_mail_config / get_sms_config / get_cpa_config)走函数,每次现读现用,

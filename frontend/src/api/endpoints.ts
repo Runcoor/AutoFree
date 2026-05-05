@@ -58,16 +58,85 @@ export interface Batch {
   ok: number; failed: number; created_at: string | null
 }
 
+export interface BatchDetailResult {
+  index: number
+  ok: boolean
+  email?: string
+  password?: string
+  error?: string
+  error_kind?: string
+  account_id?: string
+  plan_type?: string
+  cpa_pushed?: boolean
+  cpa_msg?: string
+  auth_file?: string
+  register_secs?: number
+  oauth_secs?: number
+}
+export interface BatchDetail {
+  batch: Batch
+  accounts: Account[]
+  pending: PendingAccount[]
+  results: BatchDetailResult[]
+  summary: {
+    total: number
+    ok: number
+    failed: number
+    cpa_pushed: number
+    cpa_unpushed: number
+    pending: number
+  }
+}
+
 export const freegenApi = {
-  start: (count: number, domain?: string) =>
-    api.post<{ task_id: string; batch_id: string; domain: string; count: number }>('/freegen/start',
-      { count, domain }).then(r => r.data),
+  start: (count: number, domain?: string, domain_mode: 'fixed' | 'rotate' | 'random' = 'rotate') =>
+    api.post<{
+      task_id: string; batch_id: string; domain: string
+      domain_mode: 'fixed' | 'rotate' | 'random'
+      random_pool: string[]
+      count: number
+    }>('/freegen/start', { count, domain, domain_mode }).then(r => r.data),
   stop: () => api.post<{ ok: true; msg: string }>('/freegen/stop').then(r => r.data),
   status: () => api.get<FreegenStatus>('/freegen/status').then(r => r.data),
   batches: (limit = 20) => api.get<{ items: Batch[] }>('/freegen/batches', { params: { limit } }).then(r => r.data.items),
+  batchDetail: (batch_id: string) =>
+    api.get<BatchDetail>(`/freegen/batches/${encodeURIComponent(batch_id)}`).then(r => r.data),
+  deleteBatch: (batch_id: string, drop_dir = true) =>
+    api.delete(`/freegen/batches/${encodeURIComponent(batch_id)}`, { params: { drop_dir } }).then(() => null),
+  resume: (email: string) =>
+    api.post<{ task_id: string; batch_id: string; email: string; mode: 'resume' }>('/freegen/resume',
+      { email }).then(r => r.data),
+  resumeAll: () =>
+    api.post<{ task_id: string; total: number; skipped_no_password: number; mode: 'resume_all' }>(
+      '/freegen/resume-all',
+    ).then(r => r.data),
+  manualAdd: (accounts: { email: string; password?: string }[]) =>
+    api.post<{
+      task_id: string; batch_id: string; total: number
+      skipped_existing: string[]
+      skipped_duplicate: string[]
+      mode: 'manual_add'
+    }>('/freegen/manual-add', { accounts }).then(r => r.data),
 }
 
 // ─── accounts ───────────────────────────────────────────────
+export interface CpaInventoryItem {
+  name: string
+  id: string
+  email: string
+  type: string
+  status: string
+  status_message: string
+  disabled: boolean
+  unavailable: boolean
+  size: number | null
+  updated_at: string | null
+  success: number | null
+  failed: number | null
+  in_local: boolean
+  is_failed_state: boolean
+}
+
 export interface Account {
   id: number; batch_id: string; email: string; password: string
   account_id: string; plan_type: string
@@ -103,5 +172,42 @@ export const accountsApi = {
       results: { email: string; ok: boolean; msg: string }[]
     }>(`/accounts/batch/${encodeURIComponent(batchId)}/sync-cpa`, null,
       { params: { force_refresh: forceRefresh } },
+    ).then(r => r.data),
+  cpaStats: () =>
+    api.get<{ total: number; synced: number; failed: number; unsynced: number; sync_rate: number }>(
+      '/accounts/cpa-stats',
+    ).then(r => r.data),
+  cpaReconcile: () =>
+    api.post<{
+      cpa_total: number; local_total: number; cpa_only_count: number
+      healthy: number; restored: number
+      removed_on_cpa: string[]
+      status_issues: { email: string; status: string }[]
+    }>('/accounts/cpa-reconcile').then(r => r.data),
+  cpaInventory: () =>
+    api.get<{
+      items: CpaInventoryItem[]
+      summary: {
+        total: number; active: number; disabled: number; unavailable: number
+        other_status: number; in_local: number; cpa_only: number
+      }
+    }>('/accounts/cpa-inventory').then(r => r.data),
+  cpaDelete: (names: string[]) =>
+    api.post<{
+      total: number; succeeded: number; failed: number
+      affected_local_count: number
+      affected_local_emails: string[]
+      results: { name: string; ok: boolean; msg: string }[]
+    }>('/accounts/cpa-inventory/delete', { names }).then(r => r.data),
+  syncAllUnsynced: (forceRefresh = false, includeFailed = true) =>
+    api.post<{
+      total: number; pushed: number; failed: number; skipped: number
+      results: { email: string; ok: boolean; msg: string }[]
+    }>('/accounts/sync-cpa/all-unsynced', null,
+      { params: { force_refresh: forceRefresh, include_failed: includeFailed } },
+    ).then(r => r.data),
+  reauth: (email: string) =>
+    api.post<{ task_id: string; batch_id: string; email: string; mode: 'reauth' }>(
+      `/accounts/${encodeURIComponent(email)}/re-auth`,
     ).then(r => r.data),
 }

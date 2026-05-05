@@ -1,4 +1,4 @@
-"""注册时用的随机身份(姓名/生日/密码)。从 autoteam.identity 抽出来精简版,不依赖 autoteam。"""
+"""注册时用的随机身份(姓名/生日/密码)。"""
 
 from __future__ import annotations
 

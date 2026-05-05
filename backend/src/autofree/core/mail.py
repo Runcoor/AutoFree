@@ -6,7 +6,7 @@
 - 删除邮箱 (DELETE /admin/delete_address/{id})
 - 提取 6 位 OTP
 
-不依赖 autoteam.mail.* 任何模块。MIME 解析用 stdlib email。
+MIME 解析用 stdlib email,无外部模块依赖。
 """
 
 from __future__ import annotations

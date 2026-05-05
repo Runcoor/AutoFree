@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7
-
 # ─── Stage 1: 构建前端 ──────────────────────────────────────────────────
 FROM node:22-alpine AS web
 WORKDIR /web
@@ -51,8 +49,10 @@ COPY --from=web /web/dist ./static
 RUN mkdir -p /app/data && chmod 0775 /app/data
 VOLUME ["/app/data"]
 
+# 入口:先起 Xvfb(虚拟 X server,给非 headless Chromium),再 exec uvicorn
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
 EXPOSE 8000
 
-# xvfb-run: 给非 headless Chromium 一个虚拟 X server
-CMD ["xvfb-run", "-a", "--server-args=-screen 0 1280x800x24", \
-     "uv", "run", "uvicorn", "autofree.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["/usr/local/bin/entrypoint.sh"]

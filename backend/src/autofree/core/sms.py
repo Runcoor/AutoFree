@@ -70,9 +70,7 @@ def get_active_provider(cfg: dict | None = None):
 
 # ─── 向后兼容的模块级函数(已废弃,新代码请用 get_active_provider) ──────────────
 # 这些函数的旧签名带 api_key 参数,现在 api_key 走 active provider,旧 api_key 参数被忽略。
-# 保留是为了:
-#   - autoteam api.py /sms-balance 端点用过这种风格(已改为走 provider,但保留兼容)
-#   - 可能存在的外部 CLI / 测试代码
+# 保留是为了兼容历史 /sms-balance 调用风格 + 可能存在的外部 CLI / 测试代码。
 
 def get_balance(api_key: str | None = None) -> dict:
     """已废弃 — 改用 get_active_provider().get_balance()。"""
