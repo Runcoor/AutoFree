@@ -18,6 +18,7 @@ node_modules/
 .pnpm-store/
 frontend/dist/
 *.local
+*.tsbuildinfo
 
 # IDE
 .vscode/
