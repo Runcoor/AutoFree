@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.uv/
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Node
+node_modules/
+.pnpm-store/
+frontend/dist/
+*.local
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Env / secrets
+.env
+.env.local
+.session_secret
+
+# Data / outputs
+data/
+backend/data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Tests
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Playwright
+playwright-report/
+test-results/
