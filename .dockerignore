@@ -1,0 +1,16 @@
+**/.git
+**/.venv
+**/node_modules
+**/dist
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/data
+**/static
+**/*.log
+**/.env
+**/.env.local
+docker/
+freegen_*
+*.sqlite*
+*.db

@@ -15,10 +15,21 @@ from autofree.settings import get_settings
 logger = logging.getLogger(__name__)
 
 
+def _run_migrations() -> None:
+    """跑 alembic upgrade head — 启动时自动建表/升级。"""
+    from alembic import command
+    from alembic.config import Config
+
+    cfg_path = Path(__file__).resolve().parent.parent.parent / "alembic.ini"
+    cfg = Config(str(cfg_path))
+    command.upgrade(cfg, "head")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     settings.ensure_dirs()
+    _run_migrations()
     # bootstrap 用户密码(从 .env 读 APP_PASSWORD,首启写 User 表)
     from autofree.auth.bootstrap import bootstrap_password
 
