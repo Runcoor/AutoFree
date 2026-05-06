@@ -226,7 +226,7 @@ export function PendingPage() {
               <Pill tone="muted">{filtered.length} / {items.length}</Pill>
             </span>
           }
-          subtitle="💰 = 5sim 已扣费,此号已通过手机验证 — 优先 resume,绝不能丢"
+          subtitle="💰 = SMS 已扣费,此号已通过手机验证 — 优先 resume,绝不能丢"
           action={
             <div className="flex items-center gap-1 p-1 bg-bg-soft rounded-[10px] border border-line">
               <TabBtn active={tab === 'all'} onClick={() => setTab('all')} label="全部" count={items.length} />
@@ -294,7 +294,7 @@ export function PendingPage() {
                           <span className="mono text-[13px] truncate max-w-[240px]" title={p.email}>{p.email}</span>
                           {p.phone_verified && (
                             <span
-                              title={`5sim 已扣费,此号已通过手机验证${p.phone_verified_at ? ' · ' + new Date(p.phone_verified_at).toLocaleString('zh-CN') : ''}`}
+                              title={`SMS 已扣费,此号已通过手机验证${p.phone_verified_at ? ' · ' + new Date(p.phone_verified_at).toLocaleString('zh-CN') : ''}`}
                             >
                               <Pill tone="info">💰 已付费</Pill>
                             </span>

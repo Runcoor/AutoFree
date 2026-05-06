@@ -214,7 +214,7 @@ function ProxyCard() {
     <SettingsCard
       icon={<Shield size={18} />}
       title="代理 (Proxy)"
-      subtitle="VPS → 住宅 IP 代理 · 同一号注册全程同 IP · 不同号自动换 IP(避免 WhatsApp OTP)"
+      subtitle="为浏览器自动化注入住宅 IP · 同一会话全程同 IP · 不同会话自动换 IP"
       delay={60}
     >
       {/* 启用 + provider 选择 */}
@@ -227,7 +227,7 @@ function ProxyCard() {
           </Pill>
         )}
         <span className="text-[11px] text-ink-faint ml-auto">
-          推荐:VPS 上注册 OpenAI 必须开,否则触发 WhatsApp OTP
+          建议在 VPS 环境开启,避免数据中心 IP 被风控
         </span>
       </div>
 

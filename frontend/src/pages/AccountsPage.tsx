@@ -549,7 +549,7 @@ function ManualAddModal({
               <div>
                 邮箱域名必须已配在 <strong>cloud-mail</strong>(才能收 OTP)。
                 登录走「邮箱验证码」方式 — 不需要密码。
-                若 OpenAI 要 phone gate,会自动用 5sim 拿号(消耗余额)。
+                若需手机验证,会自动调用激活的 SMS provider 拿号(消耗余额)。
                 失败的会进「待办」页可继续重试。
               </div>
             </div>

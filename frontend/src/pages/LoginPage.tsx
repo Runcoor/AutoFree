@@ -56,7 +56,7 @@ export function LoginPage() {
             />
           </div>
           <h1 className="text-[36px] font-extrabold tracking-tight grad-text leading-none">AutoFree</h1>
-          <p className="text-ink-soft mt-3 text-[14px]">批量注册 OpenAI free 账号 · 自动同步 CPA</p>
+          <p className="text-ink-soft mt-3 text-[14px]">批量注册 · 自动同步 CPA</p>
         </div>
 
         <form onSubmit={onSubmit} className="card p-7 space-y-5">
