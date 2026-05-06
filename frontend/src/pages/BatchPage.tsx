@@ -79,7 +79,7 @@ export function BatchPage() {
       push('运行中的批次不能删除', 'danger')
       return
     }
-    if (!confirm(`确认删除批次 ${b.id}?\n\n会一并清掉:\n· batch / 该批的成功账号 / 该批的待办\n· 硬盘上的 batch_<时间戳>/ 目录(含 auth/*.json)\n\n此操作不可撤销。`)) return
+    if (!confirm(`删除批次 ${b.id}?(连带账号 / 待办 / 磁盘目录)`)) return
     setDeletingBatch(b.id)
     try {
       await freegenApi.deleteBatch(b.id)

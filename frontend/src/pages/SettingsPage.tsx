@@ -460,7 +460,7 @@ function DomainsCard() {
   }
 
   async function remove(d: Domain) {
-    if (!confirm(`删除域名 @${d.domain}？`)) return
+    if (!confirm(`删除域名 @${d.domain}?`)) return
     await domainsApi.remove(d.id); refresh()
   }
 

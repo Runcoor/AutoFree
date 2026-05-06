@@ -84,7 +84,7 @@ export function CpaPage() {
 
   async function deleteOne(item: CpaInventoryItem) {
     const label = item.email || item.name
-    if (!confirm(`从 CPA 删除 ${label}?\n\n仅从 CPA 移除该 auth-file。本地 AutoFree DB 保留(若有),状态会标为「已从 CPA 删除」。\n\n此操作不可撤销。`)) return
+    if (!confirm(`从 CPA 删除 ${label}?(本地 DB 保留)`)) return
     setDeleting(item.name)
     try {
       const r = await accountsApi.cpaDelete([item.name])
@@ -104,7 +104,7 @@ export function CpaPage() {
 
   async function deleteSelected() {
     if (selected.size === 0) return
-    if (!confirm(`确认从 CPA 删除选中的 ${selected.size} 个 auth-file?\n\n仅从 CPA 移除,本地 DB 保留。此操作不可撤销。`)) return
+    if (!confirm(`从 CPA 删除选中 ${selected.size} 个?`)) return
     setBulkBusy(true)
     try {
       const r = await accountsApi.cpaDelete(Array.from(selected))
@@ -124,7 +124,7 @@ export function CpaPage() {
       push('当前没有失败状态的号', 'neutral')
       return
     }
-    if (!confirm(`一键清理所有失败状态(disabled / unavailable / 非 active),共 ${failed.length} 个?\n\n仅从 CPA 移除,本地 DB 保留。此操作不可撤销。`)) return
+    if (!confirm(`清理 ${failed.length} 个失败状态号?`)) return
     setBulkBusy(true)
     try {
       const r = await accountsApi.cpaDelete(failed.map((x) => x.name))
@@ -144,7 +144,7 @@ export function CpaPage() {
       return
     }
     const label = item.email || item.name
-    if (!confirm(`重新认证 ${label}?\n\n会启动浏览器走 OAuth 重登(已验证手机号,无需再过 phone gate),拿到新 token 后写盘并推送到 CPA。`)) return
+    if (!confirm(`重新认证 ${label}?`)) return
     setReauthing(item.name)
     try {
       const r = await accountsApi.cpaReauth({ emails: [item.email] })
@@ -170,9 +170,8 @@ export function CpaPage() {
       return
     }
     if (!confirm(
-      `批量重新认证 ${reAuthable.length} 个本地号?` +
-      (skipped > 0 ? `\n\n跳过 ${skipped} 个仅 CPA 号(本地无密码)。` : '') +
-      `\n\n串行执行,浏览器逐号 OAuth → 写盘 → CPA push。可在批次页查看实时进度。`,
+      `批量重新认证 ${reAuthable.length} 个?` +
+      (skipped > 0 ? `(跳过 ${skipped} 个仅 CPA 号)` : ''),
     )) return
     setBulkBusy(true)
     try {
@@ -192,10 +191,7 @@ export function CpaPage() {
       push('当前没有「失败状态 + 本地号」的项', 'neutral')
       return
     }
-    if (!confirm(
-      `一键重新认证所有失败的本地号(${targets.length} 个)?\n\n` +
-      `会逐号重跑 OAuth 拿新 token、推到 CPA。已验证过手机号的号通常不会再过 phone gate。`,
-    )) return
+    if (!confirm(`重新认证全部失败号 ${targets.length} 个?`)) return
     setBulkBusy(true)
     try {
       const r = await accountsApi.cpaReauth({ emails: targets.map((x) => x.email) })

@@ -66,7 +66,7 @@ export function AccountsPage() {
 
   async function bulkPushUnsynced() {
     if (!stats || stats.unsynced + stats.failed === 0) return
-    if (!confirm(`将自动 refresh + 推送 ${stats.unsynced + stats.failed} 个未同步账号到 CPA(包含之前推送失败的)。\n\n继续?`)) return
+    if (!confirm(`推送 ${stats.unsynced + stats.failed} 个未同步号到 CPA?`)) return
     setBulkBusy(true)
     try {
       const r = await accountsApi.syncAllUnsynced()
@@ -108,7 +108,7 @@ export function AccountsPage() {
       push('已有任务在运行,请等结束', 'danger')
       return
     }
-    if (!confirm(`重新认证 ${a.email}?\n\n会用浏览器重新登录该账号 → 跑 OAuth + phone gate(可能消耗 5sim 余额)→ 拿到新 bundle 后写回 + 推 CPA。\n\n适合 refresh_token 已失效的号。`)) return
+    if (!confirm(`重新认证 ${a.email}?`)) return
     setReauthing(a.email)
     try {
       const r = await accountsApi.reauth(a.email)
@@ -450,13 +450,7 @@ function ManualAddModal({
       emails = previewBulk
       if (emails.length === 0) return push('没有可解析的 email(每行一个)', 'danger')
     }
-    if (!confirm(
-      `提交 ${emails.length} 个 email?\n\n` +
-      `系统会自动从 cloud-mail 取登录 OTP → 走 chatgpt.com 邮箱验证码登录 → 拿 codex token → 推 CPA。\n` +
-      `每个号都会触发一次 OTP 邮件,可能还有 phone gate(消耗 5sim 余额)。\n\n` +
-      `要求:邮箱域名必须已配在 cloud-mail。\n` +
-      `成功 → 进「账号」页;失败 → 进「待办」页可继续验证。`,
-    )) return
+    if (!confirm(`提交 ${emails.length} 个邮箱?(走 OTP 登录,可能触发 phone gate)`)) return
     setBusy(true)
     try {
       const accounts = emails.map((e) => ({ email: e }))

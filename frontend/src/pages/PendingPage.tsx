@@ -22,15 +22,14 @@ export function PendingPage() {
   }
 
   async function remove(p: PendingAccount) {
-    if (!confirm(`删除 pending 账号 ${p.email}？(邮箱密码不会找回)`)) return
+    if (!confirm(`删除 pending ${p.email}?`)) return
     await accountsApi.removePending(p.email)
     push('已删除', 'success')
     refresh()
   }
 
   async function resume(p: PendingAccount) {
-    const mode = p.password ? '密码' : '邮箱 OTP(从 cloud-mail 取)'
-    if (!confirm(`继续验证 ${p.email}?\n\n登录方式:${mode}\n打开浏览器登录该账号 → 重跑 phone gate(消耗 5sim 余额)→ 成功后自动推 CPA。\n\n建议先去设置页确认 5sim country/operator 配的是当前可用号池(如 vietnam)。`)) return
+    if (!confirm(`继续验证 ${p.email}?(消耗 SMS 余额)`)) return
     setSubmittingEmail(p.email)
     try {
       const r = await freegenApi.resume(p.email)
@@ -49,11 +48,7 @@ export function PendingPage() {
       push('没有可继续验证的号', 'danger')
       return
     }
-    const noPwd = items.filter((p) => !p.password).length
-    const otpHint = noPwd > 0 ? `\n\n${noPwd} 个无密码 → 走邮箱 OTP 登录(从 cloud-mail 取验证码)` : ''
-    if (!confirm(
-      `一键继续验证全部 ${items.length} 个 pending?\n\n会按队列串行跑,每个号都重跑 OAuth + phone gate,会消耗 5sim 余额。\n中途可点「停止」中断当前号后停下。${otpHint}`,
-    )) return
+    if (!confirm(`继续验证全部 ${items.length} 个?(消耗 SMS 余额)`)) return
     setResumeAllBusy(true)
     try {
       const r = await freegenApi.resumeAll()
