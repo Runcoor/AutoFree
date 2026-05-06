@@ -95,6 +95,10 @@ class Account(Base):
     cpa_synced: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     cpa_synced_at: Mapped[Optional[_dt.datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     cpa_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 此号是否已通过手机验证(5sim 实际扣过费 OR 历史已验证 → OpenAI 不再要求 phone gate)。
+    # 用途:pending 列表里突显已付费号,告诉用户「这号花过钱,优先 resume,别浪费」
+    phone_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    phone_verified_at: Mapped[Optional[_dt.datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
 
     batch: Mapped[Batch] = relationship(back_populates="accounts")
@@ -109,6 +113,9 @@ class PendingAccount(Base):
     password: Mapped[str] = mapped_column(String(255), nullable=False)
     error_kind: Mapped[str] = mapped_column(String(64), default="", index=True)
     error: Mapped[str] = mapped_column(Text, default="")
+    # 5sim 真实扣过费 / 历史已验证 → 此号已通过手机验证。resume 时优先,绝不能丢
+    phone_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    phone_verified_at: Mapped[Optional[_dt.datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     resolved_at: Mapped[Optional[_dt.datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_via: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)

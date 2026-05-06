@@ -25,6 +25,31 @@ def _run_migrations() -> None:
     command.upgrade(cfg, "head")
 
 
+def _ensure_phone_verified_columns() -> None:
+    """轻量 schema 升级:给 account / pending_account 加 phone_verified 列(若缺)。
+
+    我们用 Alembic 跑迁移,但这个简单 ALTER 在 SQLite 下做幂等检测更省事。
+    SQLite 不支持 IF NOT EXISTS 加列,所以 try/except 吃掉 OperationalError。
+    """
+    from sqlalchemy import text
+    from autofree.db.base import SessionLocal
+
+    statements = [
+        ("account", "phone_verified", "BOOLEAN DEFAULT 0 NOT NULL"),
+        ("account", "phone_verified_at", "DATETIME"),
+        ("pending_account", "phone_verified", "BOOLEAN DEFAULT 0 NOT NULL"),
+        ("pending_account", "phone_verified_at", "DATETIME"),
+    ]
+    with SessionLocal() as db:
+        for table, col, coldef in statements:
+            try:
+                db.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {coldef}"))
+                db.commit()
+                logger.info("[bootstrap] 加列 %s.%s", table, col)
+            except Exception:
+                db.rollback()  # 已存在 → SQLite 抛 OperationalError,忽略即可
+
+
 def _reap_orphan_batches() -> None:
     """启动时把所有 status=running 的 Batch 标 stopped。
 
@@ -55,6 +80,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     settings.ensure_dirs()
     _run_migrations()
+    _ensure_phone_verified_columns()
     _reap_orphan_batches()
     # bootstrap 用户密码(从 .env 读 APP_PASSWORD,首启写 User 表)
     from autofree.auth.bootstrap import bootstrap_password

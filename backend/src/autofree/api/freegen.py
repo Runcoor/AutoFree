@@ -119,6 +119,10 @@ def _persist_account(info: dict, *, domain: str | None = None) -> None:
                 existing.cpa_synced = bool(info.get("cpa_pushed"))
                 existing.cpa_synced_at = _utcnow() if info.get("cpa_pushed") else existing.cpa_synced_at
                 existing.cpa_error = None if info.get("cpa_pushed") else (info.get("cpa_msg") or None)
+                # phone_verified 是 sticky:一旦置 True,后续不会反置 False
+                if info.get("phone_verified") and not existing.phone_verified:
+                    existing.phone_verified = True
+                    existing.phone_verified_at = _utcnow()
                 logger.info("[persist] reauth: updated Account %s tokens + cpa_synced=%s",
                             email, existing.cpa_synced)
             elif existing:
@@ -139,6 +143,7 @@ def _persist_account(info: dict, *, domain: str | None = None) -> None:
                         rel = str(_Path(full).resolve().relative_to(_Path(output_dir).resolve()))
                     except Exception:
                         rel = info.get("auth_file", "")
+                phone_verified = bool(info.get("phone_verified"))
                 a = Account(
                     batch_id=info.get("batch_id", ""),
                     email=email,
@@ -154,6 +159,8 @@ def _persist_account(info: dict, *, domain: str | None = None) -> None:
                     cpa_synced=bool(info.get("cpa_pushed")),
                     cpa_synced_at=_utcnow() if info.get("cpa_pushed") else None,
                     cpa_error=None if info.get("cpa_pushed") else (info.get("cpa_msg") or None),
+                    phone_verified=phone_verified,
+                    phone_verified_at=_utcnow() if phone_verified else None,
                 )
                 db.add(a)
         else:
@@ -168,6 +175,10 @@ def _persist_account(info: dict, *, domain: str | None = None) -> None:
                 if pending_row:
                     pending_row.error_kind = info.get("error_kind", "") or pending_row.error_kind
                     pending_row.error = info.get("error", "") or pending_row.error
+                    # sticky:resume 时如果走了 phone gate 又付费,标记上(原本应该已是 True)
+                    if info.get("phone_verified") and not pending_row.phone_verified:
+                        pending_row.phone_verified = True
+                        pending_row.phone_verified_at = _utcnow()
             elif is_reauth:
                 # reauth 失败 → 在现有 Account 上记 cpa_error(其他 token 不动)
                 existing = db.execute(select(Account).where(Account.email == email)).scalar_one_or_none()
@@ -181,14 +192,21 @@ def _persist_account(info: dict, *, domain: str | None = None) -> None:
                     else:
                         existing.cpa_error = raw_err
             elif info.get("register_done"):
+                # 注册批次失败 → 写 pending(append_pending_account 已写 jsonl,这里写 DB)
+                phone_verified = bool(info.get("phone_verified"))
                 p = PendingAccount(
                     batch_id=info.get("batch_id", ""),
                     email=email,
                     password=info.get("password") or "",
                     error_kind=info.get("error_kind", ""),
                     error=info.get("error", ""),
+                    phone_verified=phone_verified,
+                    phone_verified_at=_utcnow() if phone_verified else None,
                 )
                 db.add(p)
+                if phone_verified:
+                    logger.info("[persist] 💰 pending %s 已标记 phone_verified — 5sim 已扣费",
+                                email)
 
         # 任何成功路径(register / resume / manual-add / reauth)都把同 email 未解决的 pending 标 resolved
         if ok:

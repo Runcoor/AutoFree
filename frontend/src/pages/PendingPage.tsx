@@ -1,19 +1,36 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Trash2, KeyRound, Clock, RefreshCw, Upload, X, Check, AlertCircle, Play, Square, Zap } from 'lucide-react'
 import { accountsApi, freegenApi, type FreegenStatus, type PendingAccount } from '../api/endpoints'
 import { Button, Card, CardBody, CardHeader, LiveDot, Pill, ProgressBar, Textarea, useToast } from '../components/ui'
+
+type PendingTab = 'all' | 'paid' | 'unpaid'
 
 export function PendingPage() {
   const [items, setItems] = useState<PendingAccount[]>([])
   const [importing, setImporting] = useState<PendingAccount | null>(null)
   const [bulk, setBulk] = useState('')
   const [bulkBusy, setBulkBusy] = useState(false)
+  const [tab, setTab] = useState<PendingTab>('all')
   // 表示「我刚点了哪个号的继续验证」 — 仅用于 API 提交瞬间的 loading,不依赖它判断 spinner
   const [submittingEmail, setSubmittingEmail] = useState<string | null>(null)
   const [resumeAllBusy, setResumeAllBusy] = useState(false)
   const [status, setStatus] = useState<FreegenStatus | null>(null)
   const push = useToast((s) => s.push)
   const evtRef = useRef<EventSource | null>(null)
+
+  const paidCount = items.filter((p) => p.phone_verified).length
+  const unpaidCount = items.length - paidCount
+
+  const filtered = useMemo(() => {
+    let xs = items
+    if (tab === 'paid') xs = xs.filter((p) => p.phone_verified)
+    else if (tab === 'unpaid') xs = xs.filter((p) => !p.phone_verified)
+    // 已付费的优先排前(避免被忽略漏掉)
+    return [...xs].sort((a, b) => {
+      if (a.phone_verified !== b.phone_verified) return a.phone_verified ? -1 : 1
+      return (b.created_at || '').localeCompare(a.created_at || '')
+    })
+  }, [items, tab])
 
   useEffect(() => { refresh() }, [])
   function refresh() {
@@ -203,15 +220,19 @@ export function PendingPage() {
 
       <Card className="anim-in mb-5">
         <CardHeader
-          title="待处理列表"
-          subtitle="点「继续验证」让系统重跑 OAuth + phone gate;或手动导入 token"
+          title={
+            <span className="flex items-center gap-2">
+              待处理列表
+              <Pill tone="muted">{filtered.length} / {items.length}</Pill>
+            </span>
+          }
+          subtitle="💰 = 5sim 已扣费,此号已通过手机验证 — 优先 resume,绝不能丢"
           action={
-            items.length > 0 && (
-              <Pill tone="warn">
-                <AlertCircle className="w-3 h-3" />
-                需要处理
-              </Pill>
-            )
+            <div className="flex items-center gap-1 p-1 bg-bg-soft rounded-[10px] border border-line">
+              <TabBtn active={tab === 'all'} onClick={() => setTab('all')} label="全部" count={items.length} />
+              <TabBtn active={tab === 'paid'} onClick={() => setTab('paid')} label="💰 已付费" count={paidCount} tone="info" />
+              <TabBtn active={tab === 'unpaid'} onClick={() => setTab('unpaid')} label="未付费" count={unpaidCount} />
+            </div>
           }
         />
         <div className="table-wrap">
@@ -226,17 +247,20 @@ export function PendingPage() {
               </tr>
             </thead>
             <tbody>
-              {items.length === 0 && (
+              {filtered.length === 0 && (
                 <tr>
                   <td colSpan={5}>
                     <div className="empty-state">
                       <div className="empty-icon"><Check size={22} /></div>
-                      暂无待办 — 所有账号 OAuth 都成功了
+                      {items.length === 0
+                        ? '暂无待办 — 所有账号 OAuth 都成功了'
+                        : tab === 'paid' ? '没有已付费但未完成的号'
+                          : '当前筛选条件下无结果'}
                     </div>
                   </td>
                 </tr>
               )}
-              {items.map((p) => {
+              {filtered.map((p) => {
                 // 只有「正在跑这个号」才显示 spinner;其他行只是 disabled(队列等待)
                 const isRunningThis = resumeRunning && status?.current_email === p.email
                 const isSubmittingThis = submittingEmail === p.email
@@ -246,15 +270,37 @@ export function PendingPage() {
                 else if (isRunningThis) title = '当前正在跑这个号'
                 else if (isWaitingInQueue) title = '已有 resume 在跑,等结束(或一键全部时排队中)'
                 return (
-                <tr key={p.id} className={isRunningThis ? 'bg-bg-soft' : ''}>
+                <tr
+                  key={p.id}
+                  className={isRunningThis ? 'bg-bg-soft' : ''}
+                  style={p.phone_verified ? { background: 'rgba(0,114,255,0.05)' } : undefined}
+                >
                   <td>
                     <div className="flex items-center gap-2.5">
-                      <div className="w-8 h-8 rounded-[8px] grid place-items-center shrink-0" style={{ background: 'rgba(245,158,11,0.15)', color: 'var(--warn)' }}>
+                      <div
+                        className="w-8 h-8 rounded-[8px] grid place-items-center shrink-0"
+                        style={{
+                          background: p.phone_verified ? 'rgba(0,114,255,0.18)' : 'rgba(245,158,11,0.15)',
+                          color: p.phone_verified ? 'var(--info)' : 'var(--warn)',
+                        }}
+                      >
                         {isRunningThis
                           ? <RefreshCw className="w-3.5 h-3.5 animate-spin" style={{ color: 'var(--info)' }} />
-                          : <Clock className="w-3.5 h-3.5" />}
+                          : p.phone_verified ? <span style={{ fontSize: 14, lineHeight: 1 }}>💰</span>
+                            : <Clock className="w-3.5 h-3.5" />}
                       </div>
-                      <span className="mono text-[13px] truncate max-w-[240px]" title={p.email}>{p.email}</span>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className="mono text-[13px] truncate max-w-[240px]" title={p.email}>{p.email}</span>
+                          {p.phone_verified && (
+                            <span
+                              title={`5sim 已扣费,此号已通过手机验证${p.phone_verified_at ? ' · ' + new Date(p.phone_verified_at).toLocaleString('zh-CN') : ''}`}
+                            >
+                              <Pill tone="info">💰 已付费</Pill>
+                            </span>
+                          )}
+                        </div>
+                      </div>
                     </div>
                   </td>
                   <td>
@@ -343,6 +389,36 @@ export function PendingPage() {
         />
       )}
     </div>
+  )
+}
+
+function TabBtn({
+  active, onClick, label, count, tone,
+}: {
+  active: boolean; onClick: () => void; label: string; count: number; tone?: 'info'
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={
+        'px-3 py-1.5 rounded-[8px] text-[12.5px] font-medium transition flex items-center gap-1.5 ' +
+        (active
+          ? (tone === 'info' ? 'bg-info text-white' : 'grad-bg text-white shadow-glow')
+          : 'text-ink-soft hover:text-ink')
+      }
+      style={active && tone === 'info' ? { background: 'var(--info)', color: 'white' } : undefined}
+    >
+      <span>{label}</span>
+      <span
+        className={
+          'mono text-[11px] px-1.5 rounded-full ' +
+          (active ? 'bg-white/20' : 'bg-bg text-ink-faint')
+        }
+      >
+        {count}
+      </span>
+    </button>
   )
 }
 

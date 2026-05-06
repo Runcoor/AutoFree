@@ -1091,6 +1091,9 @@ def fetch_personal_bundle(
         "[oauth] 开始 OAuth %s (mail_baseline_id=%d, session_token=%s)",
         email, mail_baseline_id, "yes" if session_token else "no",
     )
+    # 跟踪本次 OAuth 是否真实通过 5sim 付费(_solve_phone_gate finish_order 成功才算)。
+    # 用 list 包一层让闭包可写。
+    phone_paid_via_sms = [False]
 
     auth_code: list[str | None] = [None]
 
@@ -1180,6 +1183,9 @@ def fetch_personal_bundle(
             if detect_phone_block(page):
                 logger.info("[oauth] 检测到 phone gate,尝试 5sim 自动验证")
                 _solve_phone_gate(page)
+                # 走到这说明 5sim finish_order 成功(扣费已发生)
+                phone_paid_via_sms[0] = True
+                logger.info("[oauth] ✓ 标记 phone_verified — 5sim 已扣费,此号必须保留")
                 safe_screenshot(page, SCREENSHOT_DIR / "oauth_02b_phone_done.png")
 
             assert_not_blocked(page, "oauth_post_login")
@@ -1203,6 +1209,8 @@ def fetch_personal_bundle(
                 if detect_phone_block(page):
                     logger.info("[oauth] consent 中遇到 phone gate,尝试 5sim 解锁")
                     _solve_phone_gate(page)
+                    phone_paid_via_sms[0] = True
+                    logger.info("[oauth] ✓ 标记 phone_verified (consent 中)")
                 assert_not_blocked(page, f"oauth_consent_{step}")
                 assert_account_alive(page, f"consent_{step}")
                 acted = _consent_step(page)
@@ -1233,6 +1241,12 @@ def fetch_personal_bundle(
                     time.sleep(1)
 
             safe_screenshot(page, SCREENSHOT_DIR / "oauth_04_final.png")
+        except Exception as _exc:
+            # 任何异常出来都把 phone_paid 标记带上,不让 5sim 付费记录在异常路径丢失
+            if phone_paid_via_sms[0]:
+                try: _exc.phone_paid_via_sms = True  # type: ignore[attr-defined]
+                except Exception: pass
+            raise
         finally:
             try:
                 browser.close()
@@ -1240,7 +1254,14 @@ def fetch_personal_bundle(
                 pass
 
     if not auth_code[0]:
+        # 重要:即使 OAuth 拿不到 code,只要 5sim 这次扣过费,也要把这个状态告诉调用方,
+        # 让 PendingAccount.phone_verified=True 标记,resume 时就不会再烧 5sim
+        if phone_paid_via_sms[0]:
+            exc = OAuthFailed(f"未捕获到 auth_code (page may have stalled). 看截图 {SCREENSHOT_DIR}/")
+            exc.phone_paid_via_sms = True  # type: ignore[attr-defined]
+            raise exc
         raise OAuthFailed(f"未捕获到 auth_code (page may have stalled). 看截图 {SCREENSHOT_DIR}/")
 
     bundle = _exchange_code(auth_code[0], code_verifier, fallback_email=email)
+    bundle["phone_verified"] = phone_paid_via_sms[0]
     return bundle

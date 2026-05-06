@@ -40,6 +40,8 @@ def _serialize_account(a: Account) -> dict:
         "cpa_synced": a.cpa_synced,
         "cpa_synced_at": a.cpa_synced_at.isoformat() if a.cpa_synced_at else None,
         "cpa_error": a.cpa_error,
+        "phone_verified": a.phone_verified,
+        "phone_verified_at": a.phone_verified_at.isoformat() if a.phone_verified_at else None,
         "created_at": a.created_at.isoformat() if a.created_at else None,
     }
 
@@ -52,6 +54,8 @@ def _serialize_pending(p: PendingAccount) -> dict:
         "password": p.password,
         "error_kind": p.error_kind,
         "error": p.error,
+        "phone_verified": p.phone_verified,
+        "phone_verified_at": p.phone_verified_at.isoformat() if p.phone_verified_at else None,
         "created_at": p.created_at.isoformat() if p.created_at else None,
         "resolved_at": p.resolved_at.isoformat() if p.resolved_at else None,
         "resolved_via": p.resolved_via,
