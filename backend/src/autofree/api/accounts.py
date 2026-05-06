@@ -499,14 +499,15 @@ def cpa_inventory_reauth(
     seen: set[str] = set()
     target_emails = [e for e in target_emails if not (e in seen or seen.add(e))]
 
-    # 2) 解析每个 email → 本地 Account
+    # 2) 解析每个 email → 本地 Account(没 Account 也允许,走 email-only OTP)
     items: list[tuple[str, str | None, str]] = []
     for em in target_emails:
         a = db.execute(select(Account).where(Account.email == em)).scalar_one_or_none()
-        if not a:
-            skipped.append({"email": em, "reason": "本地无 Account 记录(仅 CPA 号无法 reauth)"})
-            continue
-        items.append((em, a.password or None, a.batch_id or ""))
+        if a:
+            items.append((em, a.password or None, a.batch_id or ""))
+        else:
+            # 仅 CPA 号 → 走 email-only OTP,需要邮箱域名在 cloud-mail 池
+            items.append((em, None, ""))
 
     if not items:
         return {

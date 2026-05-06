@@ -139,11 +139,11 @@ export function CpaPage() {
   }
 
   async function reauthOne(item: CpaInventoryItem) {
-    if (!item.in_local) {
-      push('仅 CPA 号无法重新认证(本地无密码 / 邮箱)', 'danger')
+    if (!item.email) {
+      push('该项缺 email,无法 reauth', 'danger')
       return
     }
-    const label = item.email || item.name
+    const label = item.email
     if (!confirm(`重新认证 ${label}?`)) return
     setReauthing(item.name)
     try {
@@ -163,15 +163,15 @@ export function CpaPage() {
 
   async function reauthSelected() {
     const selectedItems = items.filter((x) => selected.has(x.name))
-    const reAuthable = selectedItems.filter((x) => x.in_local)
+    const reAuthable = selectedItems.filter((x) => x.email)
     const skipped = selectedItems.length - reAuthable.length
     if (reAuthable.length === 0) {
-      push('选中项里没有本地账号,无法 reauth', 'danger')
+      push('选中项缺 email,无法 reauth', 'danger')
       return
     }
     if (!confirm(
       `批量重新认证 ${reAuthable.length} 个?` +
-      (skipped > 0 ? `(跳过 ${skipped} 个仅 CPA 号)` : ''),
+      (skipped > 0 ? `(跳过 ${skipped} 个无 email)` : ''),
     )) return
     setBulkBusy(true)
     try {
@@ -186,9 +186,9 @@ export function CpaPage() {
   }
 
   async function reauthAllFailedLocal() {
-    const targets = items.filter((x) => x.is_failed_state && x.in_local)
+    const targets = items.filter((x) => x.is_failed_state && x.email)
     if (targets.length === 0) {
-      push('当前没有「失败状态 + 本地号」的项', 'neutral')
+      push('当前没有失败状态 / 缺 email 的项', 'neutral')
       return
     }
     if (!confirm(`重新认证全部失败号 ${targets.length} 个?`)) return
@@ -205,8 +205,8 @@ export function CpaPage() {
   }
 
   const failedCount = items.filter((x) => x.is_failed_state).length
-  const failedLocalCount = items.filter((x) => x.is_failed_state && x.in_local).length
-  const selectedReauthableCount = items.filter((x) => selected.has(x.name) && x.in_local).length
+  const failedLocalCount = items.filter((x) => x.is_failed_state && x.email).length
+  const selectedReauthableCount = items.filter((x) => selected.has(x.name) && x.email).length
 
   return (
     <div className="page">
@@ -416,14 +416,16 @@ export function CpaPage() {
                   </td>
                   <td>
                     <div className="flex items-center gap-1.5">
-                      {it.in_local && (
+                      {it.email && (
                         <button
                           type="button"
                           className="btn btn-ghost"
                           style={{ padding: '6px 10px', fontSize: 12 }}
                           onClick={() => reauthOne(it)}
                           disabled={reauthing === it.name || deleting === it.name || bulkBusy}
-                          title="重新走一次 OAuth 拿新 token,失败号也能用(已验证过手机号无需 phone gate)"
+                          title={it.in_local
+                            ? '重跑 OAuth 拿新 token,推回 CPA(本地有密码,直接登录)'
+                            : '仅 CPA 号 → 走 email-only OTP 重登(需邮箱域名在 cloud-mail 池)'}
                         >
                           {reauthing === it.name
                             ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
@@ -456,8 +458,8 @@ export function CpaPage() {
       <div className="text-[12px] text-ink-faint flex items-start gap-2">
         <FilterIcon className="w-3 h-3 shrink-0 mt-0.5" />
         <span>
-          点击统计卡切换筛选;选中后可批量「重新认证」(走 OAuth 拿新 token,推回 CPA)或「删除」。
-          只有「本地 + CPA」的号能 reauth(需要邮箱 / 密码);仅 CPA 号只能删。删除仅作用于 CPA 远端。
+          点击统计卡切换筛选;选中后可「重新认证」(走 OAuth 拿新 token 推回 CPA)或「删除」。
+          本地号用密码登录,仅 CPA 号走 email-only OTP(需邮箱域名在 cloud-mail 池)。删除仅作用于 CPA 远端。
         </span>
       </div>
     </div>
