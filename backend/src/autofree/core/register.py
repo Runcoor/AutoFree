@@ -200,12 +200,13 @@ _NAME_SELECTORS = (
 )
 _AGE_SELECTORS = (
     'input[name="age"]',
-    'input[type="number"]',
     'input[placeholder="Age"]',
     'input[placeholder*="Age" i]',
     'input[placeholder*="age" i]',
     'input[placeholder*="年龄"]',
 )
+# 注意:故意不加 'input[type="number"]' — 新版生日 spinbutton 也是 type=number,
+# 会误中并把 age_str 塞到月份字段(导致 "Hmm, that doesn't look right")
 _SUBMIT_SELECTORS = (
     'button:has-text("Finish creating account")',
     'button:has-text("完成帐户创建")',
@@ -233,6 +234,130 @@ def _try_fill(page, selectors: tuple, value: str, label: str) -> bool:
         except Exception:
             continue
     return False
+
+
+def _classify_birthday_field(sb) -> str | None:
+    """根据 aria-label / placeholder 判断 spinbutton 是 month / day / year 哪一个。"""
+    try:
+        label = (sb.get_attribute("aria-label") or "").lower()
+    except Exception:
+        label = ""
+    try:
+        placeholder = (sb.get_attribute("placeholder") or "").lower()
+    except Exception:
+        placeholder = ""
+    try:
+        name = (sb.get_attribute("name") or "").lower()
+    except Exception:
+        name = ""
+    blob = f"{label} {placeholder} {name}"
+    # year 优先判断(yyyy / yy / year),避免 "day" 也包含 "y"
+    if "year" in blob or "yyyy" in placeholder or "yy" == placeholder:
+        return "year"
+    if "month" in blob or placeholder == "mm" or "mm/" in placeholder:
+        return "month"
+    if "day" in blob or placeholder == "dd" or "dd/" in placeholder:
+        return "day"
+    return None
+
+
+def _fill_one_spinbutton(page, sb, value: str) -> None:
+    """点中 spinbutton → 全选清空 → 输入 value。带多重 fallback。"""
+    try:
+        sb.click(force=True)
+        time.sleep(0.15)
+    except Exception:
+        pass
+    # 三种清空策略,谁好用谁来
+    try:
+        # 优先用 fill (Playwright 自带:先 select-all 再 type)
+        sb.fill(value)
+        return
+    except Exception:
+        pass
+    # fallback: Ctrl/Meta+A 全选 → type
+    cleared = False
+    for keys in ("Control+a", "Meta+a", "ControlOrMeta+a"):
+        try:
+            page.keyboard.press(keys)
+            time.sleep(0.05)
+            cleared = True
+            break
+        except Exception:
+            continue
+    if not cleared:
+        # 再 fallback: triple click 选中 + Backspace
+        try:
+            sb.click(click_count=3, force=True)
+            page.keyboard.press("Backspace")
+        except Exception:
+            pass
+    page.keyboard.type(value, delay=60)
+    time.sleep(0.2)
+
+
+def _fill_birthday_spinbuttons(page, bday: dict) -> None:
+    """填新版 about-you 的 3 个生日 spinbutton — 按 aria-label / placeholder 识别字段位置,
+    不假设 MM/DD/YYYY 或其他顺序。识别不到的话回退到原始位置 (month, day, year)。
+    """
+    try:
+        spinbuttons = page.locator('[role="spinbutton"]').all()
+    except Exception:
+        spinbuttons = []
+
+    if len(spinbuttons) < 3:
+        # 退一步:有些变体直接用 input[type=number] 不带 role,按 placeholder 找
+        try:
+            spinbuttons = []
+            for tag in ("month", "day", "year"):
+                el = page.locator(
+                    f'input[placeholder*="{tag}" i], input[aria-label*="{tag}" i]'
+                ).first
+                if el.is_visible(timeout=300):
+                    spinbuttons.append(el)
+        except Exception:
+            spinbuttons = []
+
+    if not spinbuttons:
+        logger.warning("[register] 没找到 age input 也没找到生日字段 — 表单可能改版")
+        return
+
+    slots: dict[str, object] = {}
+    for sb in spinbuttons:
+        kind = _classify_birthday_field(sb)
+        if kind and kind not in slots:
+            slots[kind] = sb
+
+    try:
+        if len(slots) >= 3:
+            # 识别到了:按字段名填
+            _fill_one_spinbutton(page, slots["month"], bday["month"])
+            _fill_one_spinbutton(page, slots["day"], bday["day"])
+            _fill_one_spinbutton(page, slots["year"], bday["year"])
+            logger.info(
+                "[register] 填生日 (按字段): MM=%s DD=%s YYYY=%s",
+                bday["month"], bday["day"], bday["year"],
+            )
+            return
+    except Exception as exc:
+        logger.warning("[register] 按字段填生日失败,回退位置法: %s", exc)
+
+    # 回退:按位置(美式 MM / DD / YYYY 顺序)
+    if len(spinbuttons) >= 3:
+        positional = (bday["month"], bday["day"], bday["year"])
+        try:
+            for sb, val in zip(spinbuttons[:3], positional):
+                _fill_one_spinbutton(page, sb, val)
+            logger.info(
+                "[register] 填生日 (位置法 MM/DD/YYYY): %s/%s/%s",
+                bday["month"], bday["day"], bday["year"],
+            )
+        except Exception as exc:
+            logger.warning("[register] 位置法填生日也失败: %s", exc)
+    else:
+        logger.warning(
+            "[register] spinbutton 不足 3 个 (找到 %d),无法填生日", len(spinbuttons),
+        )
 
 
 def _detect_about_you_error(page) -> str | None:
@@ -277,33 +402,18 @@ def _complete_about_you(page) -> None:
         except Exception:
             pass
 
-    # 2) 填年龄(新 A/B 变体只有 age 一个字段) 或 生日 spinbutton(老变体)
+    # 2) 填年龄(老 A/B:单 age 字段) 或 生日 spinbutton(新 A/B:MM/DD/YYYY)
     bday = random_birthday()
     age_str = str(int(time.strftime("%Y")) - int(bday["year"]))  # 由 birthday year 反推 age
     age_filled = _try_fill(page, _AGE_SELECTORS, age_str, "年龄")
     if not age_filled:
-        try:
-            spinbuttons = page.locator('[role="spinbutton"]').all()
-        except Exception:
-            spinbuttons = []
-        if len(spinbuttons) >= 3:
-            values = (bday["year"], bday["month"], bday["day"])
-            try:
-                for sb, val in zip(spinbuttons[:3], values):
-                    sb.click(force=True)
-                    time.sleep(0.2)
-                    try:
-                        page.keyboard.press("ControlOrMeta+A")
-                        time.sleep(0.1)
-                    except Exception:
-                        pass
-                    page.keyboard.type(val, delay=80)
-                    time.sleep(0.3)
-                logger.info("[register] 填生日 (spinbutton): %s/%s/%s", *values)
-            except Exception as exc:
-                logger.warning("[register] spinbutton 生日填入失败: %s", exc)
-        else:
-            logger.warning("[register] 没找到 age input 也没找到 spinbutton — 表单可能改版")
+        _fill_birthday_spinbuttons(page, bday)
+
+    # 提交前截一张图,失败时方便看到我们填的具体值
+    try:
+        safe_screenshot(page, SCREENSHOT_DIR / "06a_about_you_filled.png")
+    except Exception:
+        pass
 
     # 3) 提交一次(只一次!)
     submitted = False

@@ -659,6 +659,9 @@ def _live_url(page) -> str:
     Playwright sync API 实测过这个:页面已渲染新组件 + body 已更新,但 page.url
     属性还指向上一个 URL。原因不明(可能跟 SPA route + Playwright 内部缓存有关)。
     page.evaluate 直接问浏览器 window.location.href, 永远是真值.
+
+    例外:连接被拒(localhost:1455 没人监听)时 evaluate 返 'chrome-error://...',
+    但 page.url 仍是原始的 callback URL 含 code= — 这种情况优先 page.url。
     """
     try:
         u1 = (page.url or "").lower()
@@ -668,7 +671,9 @@ def _live_url(page) -> str:
         u2 = str(page.evaluate("() => window.location.href") or "").lower()
     except Exception:
         u2 = ""
-    # 两个都拿到时, 优先用 evaluate (真值);只有一个就用一个
+    # evaluate 返 chrome-error/about:blank/data: 时退回 page.url(可能含真实跳转 URL)
+    if u2.startswith(("chrome-error", "about:", "data:")):
+        return u1 or u2
     return u2 or u1
 
 
@@ -1103,7 +1108,10 @@ def fetch_personal_bundle(
         def _try_extract_code(url: str, source: str) -> bool:
             if not url or auth_code[0]:
                 return False
-            if f"localhost:{CODEX_CALLBACK_PORT}/auth/callback" not in url:
+            # 宽松匹配:只要 path 含 /auth/callback 且 query 含 code=,无论 host
+            # (localhost / 127.0.0.1 / [::1] 都视作 callback)
+            url_low = url.lower()
+            if "/auth/callback" not in url_low:
                 return False
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
             code = qs.get("code", [None])[0]
@@ -1114,10 +1122,24 @@ def fetch_personal_bundle(
             return False
 
         def _on_request(request):
-            _try_extract_code(request.url, "request")
+            try:
+                _try_extract_code(request.url, "request")
+            except Exception:
+                pass
+
+        def _on_requestfailed(request):
+            # 连接被拒(localhost:1455 没监听 = ERR_CONNECTION_REFUSED)走这里
+            # 这时 page 可能已渲染 chrome-error,但 request.url 仍是原始 callback URL
+            try:
+                _try_extract_code(request.url, "requestfailed")
+            except Exception:
+                pass
 
         def _on_response(response):
-            _try_extract_code(response.url, "response")
+            try:
+                _try_extract_code(response.url, "response")
+            except Exception:
+                pass
 
         def _on_framenav(frame):
             try:
@@ -1126,6 +1148,7 @@ def fetch_personal_bundle(
                 pass
 
         page.on("request", _on_request)
+        page.on("requestfailed", _on_requestfailed)
         page.on("response", _on_response)
         page.on("framenavigated", _on_framenav)
 
