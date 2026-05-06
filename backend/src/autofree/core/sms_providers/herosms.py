@@ -176,18 +176,26 @@ SERVICE_NAME_TO_CODE = {
 
 
 def _country_to_id(country: str) -> int:
-    """friendly 名 → 数字 ID。已是纯数字直接用;不认得 raise。"""
+    """friendly 名 → 数字 ID。已是纯数字直接用;不认得 raise。
+
+    宽松匹配:去空格 / 连字符 / 下划线 — `south africa` / `South-Africa` / `south_africa` 都识别。
+    """
     s = (country or "").strip().lower()
     if not s:
         return 16  # 默认 England
     if s.isdigit():
         return int(s)
+    # 先 raw 查一遍(包含 2 字母代码 ru/ua 这种,不能误删空白)
     if s in COUNTRY_NAME_TO_ID:
         return COUNTRY_NAME_TO_ID[s]
+    # 退回宽松匹配:去掉空白 / 连字符 / 下划线
+    normalized = s.replace(" ", "").replace("-", "").replace("_", "")
+    if normalized and normalized in COUNTRY_NAME_TO_ID:
+        return COUNTRY_NAME_TO_ID[normalized]
     from autofree.core.sms import SmsConfigMissing
     raise SmsConfigMissing(
-        f"hero-sms: 不认识国家 {country!r} — 请用英文名(england/france/usa)"
-        f"或直接传数字 ID(England=16 / France=78 / USA=12)"
+        f"hero-sms: 不认识国家 {country!r} — 请用英文名(england/france/usa/southafrica)"
+        f"或 2 字母代码(gb/fr/us/za)或数字 ID(England=16 / France=78 / SouthAfrica=31)"
     )
 
 
