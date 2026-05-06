@@ -32,7 +32,7 @@ from autofree.core.browser import (
 )
 from autofree.core.config import EMAIL_POLL_TIMEOUT, SCREENSHOT_DIR, get_sms_config
 from autofree.core.control import is_stop_requested
-from autofree.core.errors import BatchStopped, OAuthFailed, RegisterBlocked
+from autofree.core.errors import AccountDeactivated, BatchStopped, OAuthFailed, RegisterBlocked
 from autofree.core import sms as sms_mod
 
 logger = logging.getLogger(__name__)
@@ -216,6 +216,46 @@ def _silent_step0(context, *, debug_screenshot_path) -> None:
             p.close()
         except Exception:
             pass
+
+
+# ─── 终结性账号错误检测 ─────────────────────────────────────────────────────
+# OpenAI 在 auth 页面会以 banner / inline error 形式返回这些 code,撞到任一个都说明
+# 号已废,reauth 无意义。提早抛 AccountDeactivated 跳过 phone gate / consent,省 5sim。
+_TERMINAL_ACCOUNT_ERRORS = (
+    "account_deactivated",
+    "account_disabled",
+    "account_blocked",
+    "user_disabled",
+)
+
+
+def detect_account_deactivated(page) -> str | None:
+    """扫页面 body / URL 找终结性 account_* 错误码。返中招的 code,没找到返 None。"""
+    try:
+        body = (page.inner_text("body", timeout=1500) or "")[:2000].lower()
+    except Exception:
+        body = ""
+    try:
+        url = (page.url or "").lower()
+    except Exception:
+        url = ""
+    for code in _TERMINAL_ACCOUNT_ERRORS:
+        if code in body or code in url:
+            return code
+    return None
+
+
+def assert_account_alive(page, where: str) -> None:
+    """若页面显示账号已废,raise AccountDeactivated 立即终结。"""
+    code = detect_account_deactivated(page)
+    if code:
+        try:
+            safe_screenshot(page, SCREENSHOT_DIR / f"oauth_dead_{where}.png")
+        except Exception:
+            pass
+        raise AccountDeactivated(
+            f"账号已被 OpenAI 停用({code}@{where})— reauth 无意义,请删除"
+        )
 
 
 def _login_form_walk(page, email: str, password: str, mail_client, mail_baseline_id: int) -> None:
@@ -1109,6 +1149,10 @@ def fetch_personal_bundle(
                 _login_form_walk_email_only(page, email, mail_client, mail_baseline_id)
             safe_screenshot(page, SCREENSHOT_DIR / "oauth_02_after_login.png")
 
+            # 关键:登录后立即查账号是否已废 — 撞到 account_deactivated 等错误就直接抛,
+            # 不进 phone gate(省 5sim)、不进 consent loop
+            assert_account_alive(page, "post_login")
+
             # add-phone gate:先尝试 5sim 解锁,解不开才 raise RegisterBlocked
             if detect_phone_block(page):
                 logger.info("[oauth] 检测到 phone gate,尝试 5sim 自动验证")
@@ -1116,6 +1160,7 @@ def fetch_personal_bundle(
                 safe_screenshot(page, SCREENSHOT_DIR / "oauth_02b_phone_done.png")
 
             assert_not_blocked(page, "oauth_post_login")
+            assert_account_alive(page, "post_phone")
 
             # consent loop:最多 8 轮 — 沿用经验证过的成熟做法.
             # auth_code 主要靠 page.on(request/response/framenavigated) 三个 hook 抓取
@@ -1136,6 +1181,7 @@ def fetch_personal_bundle(
                     logger.info("[oauth] consent 中遇到 phone gate,尝试 5sim 解锁")
                     _solve_phone_gate(page)
                 assert_not_blocked(page, f"oauth_consent_{step}")
+                assert_account_alive(page, f"consent_{step}")
                 acted = _consent_step(page)
                 safe_screenshot(page, SCREENSHOT_DIR / f"oauth_03_consent_{step + 1}.png")
                 if not acted:

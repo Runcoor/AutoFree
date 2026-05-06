@@ -20,7 +20,7 @@ from typing import Any
 
 from autofree.core.config import OUTPUT_DIR, SCREENSHOT_DIR, assert_configured
 from autofree.core.control import is_stop_requested, reset_stop
-from autofree.core.errors import BatchStopped, OAuthFailed, RegisterBlocked, RegisterFailed
+from autofree.core.errors import AccountDeactivated, BatchStopped, OAuthFailed, RegisterBlocked, RegisterFailed
 from autofree.core.identity import random_password
 from autofree.core.mail import MailClient
 from autofree.core.oauth import fetch_personal_bundle
@@ -257,6 +257,16 @@ def run_batch(
                                    "error": str(exc), "error_kind": "register",
                                    "register_done": register_done})
             _drop_email()
+        except AccountDeactivated as exc:
+            # 终结性:号已被 OpenAI 停用,reauth 无意义。不写 pending,标记 error_kind=deactivated。
+            record["error"] = f"account_deactivated: {exc}"
+            record["error_kind"] = "deactivated"
+            failed_count += 1
+            logger.error("[batch] (%d/%d) 🪦 deactivated: %s", i, count, exc)
+            _emit("account_done", {**idx_info, "ok": False, "email": email,
+                                   "password": password, "batch_id": batch_id,
+                                   "error": str(exc), "error_kind": "deactivated",
+                                   "register_done": register_done})
         except OAuthFailed as exc:
             record["error"] = f"oauth_failed: {exc}"
             record["error_kind"] = "oauth"
@@ -450,6 +460,17 @@ def run_single_resume(
         logger.error("[resume] %s ❌ blocked: %s", email, exc)
         _emit("account_done", {**idx_info, "ok": False, "email": email, "password": password,
                                "batch_id": batch_id, "error": str(exc), "error_kind": kind,
+                               "register_done": True, "mode": "resume"})
+        _emit("finished", {"ok": 0, "failed": 1, "batch_dir": str(batch_dir),
+                           "stopped": False, "mode": "resume"})
+        return record
+    except AccountDeactivated as exc:
+        # 终结:号已废,不再写 pending(reauth 无意义)
+        record["error"] = f"account_deactivated: {exc}"
+        record["error_kind"] = "deactivated"
+        logger.error("[resume] %s 🪦 deactivated: %s", email, exc)
+        _emit("account_done", {**idx_info, "ok": False, "email": email, "password": password,
+                               "batch_id": batch_id, "error": str(exc), "error_kind": "deactivated",
                                "register_done": True, "mode": "resume"})
         _emit("finished", {"ok": 0, "failed": 1, "batch_dir": str(batch_dir),
                            "stopped": False, "mode": "resume"})

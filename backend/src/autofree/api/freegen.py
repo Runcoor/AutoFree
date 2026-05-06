@@ -173,7 +173,13 @@ def _persist_account(info: dict, *, domain: str | None = None) -> None:
                 existing = db.execute(select(Account).where(Account.email == email)).scalar_one_or_none()
                 if existing:
                     existing.cpa_synced = False
-                    existing.cpa_error = info.get("error") or "reauth 失败"
+                    err_kind = info.get("error_kind") or ""
+                    raw_err = info.get("error") or "reauth 失败"
+                    # account_deactivated 等终结错误 → 加显眼前缀,UI 据此显示「已废」徽标
+                    if err_kind == "deactivated":
+                        existing.cpa_error = f"🪦 deactivated: {raw_err}"
+                    else:
+                        existing.cpa_error = raw_err
             elif info.get("register_done"):
                 p = PendingAccount(
                     batch_id=info.get("batch_id", ""),

@@ -207,7 +207,9 @@ def cpa_inventory(
         raise HTTPException(502, f"拉 CPA 列表失败: {payload}")
     cpa_files = payload  # type: ignore[assignment]
 
-    local_emails = {a.email for a in db.execute(select(Account)).scalars().all()}
+    local_rows = db.execute(select(Account)).scalars().all()
+    local_emails = {a.email for a in local_rows}
+    local_cpa_error = {a.email: (a.cpa_error or "") for a in local_rows}
 
     items = []
     n_active = n_disabled = n_unavailable = n_other = 0
@@ -218,6 +220,9 @@ def cpa_inventory(
         disabled = bool(f.get("disabled"))
         unavailable = bool(f.get("unavailable"))
         in_local = email in local_emails if email else False
+        loc_err = local_cpa_error.get(email, "") if in_local else ""
+        # 终结性「号已废」标记 — reauth 流程检测到 account_deactivated 时写入,前缀 🪦
+        is_dead = "🪦" in loc_err or "deactivated" in loc_err.lower()
         if disabled:
             n_disabled += 1
         elif unavailable:
@@ -242,6 +247,8 @@ def cpa_inventory(
             "success": f.get("success"),
             "failed": f.get("failed"),
             "in_local": in_local,
+            "local_cpa_error": loc_err,
+            "is_dead": is_dead,
             # 是否「失败状态」 — 给前端批量按钮用
             "is_failed_state": disabled or unavailable or (bool(status) and status != "active"),
         })

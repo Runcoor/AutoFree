@@ -26,5 +26,12 @@ class OAuthFailed(FreegenError):
     """OAuth 拿不到 auth_code 或 token 交换失败。"""
 
 
+class AccountDeactivated(OAuthFailed):
+    """OpenAI 已停用此账号(account_deactivated 等终结错误)— reauth 无意义,只能删。
+
+    继承 OAuthFailed,所以现有 except OAuthFailed 仍能 catch;调用方可单独 except 优先处理。
+    """
+
+
 class BatchStopped(FreegenError):
     """用户从 UI/API 主动停止了 batch — 当前账号会被记为 stopped,batch 立即退出。"""

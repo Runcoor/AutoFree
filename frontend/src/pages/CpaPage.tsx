@@ -118,6 +118,26 @@ export function CpaPage() {
     }
   }
 
+  async function deleteAllDead() {
+    const dead = items.filter((x) => x.is_dead)
+    if (dead.length === 0) {
+      push('当前没有已废号', 'neutral')
+      return
+    }
+    if (!confirm(`删除 ${dead.length} 个已废号(account_deactivated)?`)) return
+    setBulkBusy(true)
+    try {
+      const r = await accountsApi.cpaDelete(dead.map((x) => x.name))
+      const tone = r.failed === 0 ? 'success' : r.succeeded > 0 ? 'neutral' : 'danger'
+      push(`完成 — 成功 ${r.succeeded} · 失败 ${r.failed}`, tone as any)
+      await refresh()
+    } catch (err: any) {
+      push(err?.response?.data?.detail || '删除失败', 'danger')
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
   async function deleteAllFailed() {
     const failed = items.filter((x) => x.is_failed_state)
     if (failed.length === 0) {
@@ -186,12 +206,12 @@ export function CpaPage() {
   }
 
   async function reauthAllFailedLocal() {
-    const targets = items.filter((x) => x.is_failed_state && x.email)
+    const targets = items.filter((x) => x.is_failed_state && x.email && !x.is_dead)
     if (targets.length === 0) {
-      push('当前没有失败状态 / 缺 email 的项', 'neutral')
+      push('没有可重认证的失败号(已废号请直接删除)', 'neutral')
       return
     }
-    if (!confirm(`重新认证全部失败号 ${targets.length} 个?`)) return
+    if (!confirm(`重新认证全部失败号 ${targets.length} 个?(已自动跳过号已废)`)) return
     setBulkBusy(true)
     try {
       const r = await accountsApi.cpaReauth({ emails: targets.map((x) => x.email) })
@@ -205,8 +225,9 @@ export function CpaPage() {
   }
 
   const failedCount = items.filter((x) => x.is_failed_state).length
-  const failedLocalCount = items.filter((x) => x.is_failed_state && x.email).length
-  const selectedReauthableCount = items.filter((x) => selected.has(x.name) && x.email).length
+  const deadCount = items.filter((x) => x.is_dead).length
+  const failedLocalCount = items.filter((x) => x.is_failed_state && x.email && !x.is_dead).length
+  const selectedReauthableCount = items.filter((x) => selected.has(x.name) && x.email && !x.is_dead).length
 
   return (
     <div className="page">
@@ -218,6 +239,12 @@ export function CpaPage() {
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          {deadCount > 0 && (
+            <Button variant="danger" onClick={deleteAllDead} loading={bulkBusy}>
+              <span style={{ fontSize: 14, lineHeight: 1 }}>🪦</span>
+              删除已废号 ({deadCount})
+            </Button>
+          )}
           {failedLocalCount > 0 && (
             <Button variant="primary" onClick={reauthAllFailedLocal} loading={bulkBusy}>
               <KeyRound className="w-3.5 h-3.5" />
@@ -395,16 +422,19 @@ export function CpaPage() {
                     )}
                   </td>
                   <td>
-                    {it.disabled
-                      ? <Pill tone="danger"><Power className="w-3 h-3" />disabled</Pill>
-                      : it.unavailable
-                        ? <Pill tone="danger"><AlertCircle className="w-3 h-3" />unavailable</Pill>
-                        : it.status === 'active'
-                          ? <Pill tone="success"><Check className="w-3 h-3" />active</Pill>
-                          : <Pill tone="warn">{it.status || 'unknown'}</Pill>}
-                    {it.status_message && (
-                      <div className="text-[11px] text-ink-faint mt-1 max-w-[260px] truncate" title={it.status_message}>
-                        {it.status_message}
+                    {it.is_dead
+                      ? <span title={it.local_cpa_error}><Pill tone="danger">🪦 号已废</Pill></span>
+                      : it.disabled
+                        ? <Pill tone="danger"><Power className="w-3 h-3" />disabled</Pill>
+                        : it.unavailable
+                          ? <Pill tone="danger"><AlertCircle className="w-3 h-3" />unavailable</Pill>
+                          : it.status === 'active'
+                            ? <Pill tone="success"><Check className="w-3 h-3" />active</Pill>
+                            : <Pill tone="warn">{it.status || 'unknown'}</Pill>}
+                    {(it.is_dead ? it.local_cpa_error : it.status_message) && (
+                      <div className="text-[11px] text-ink-faint mt-1 max-w-[260px] truncate"
+                           title={it.is_dead ? it.local_cpa_error : it.status_message}>
+                        {it.is_dead ? it.local_cpa_error : it.status_message}
                       </div>
                     )}
                   </td>
@@ -416,7 +446,7 @@ export function CpaPage() {
                   </td>
                   <td>
                     <div className="flex items-center gap-1.5">
-                      {it.email && (
+                      {it.email && !it.is_dead && (
                         <button
                           type="button"
                           className="btn btn-ghost"

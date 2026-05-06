@@ -150,6 +150,8 @@ export interface CpaInventoryItem {
   success: number | null
   failed: number | null
   in_local: boolean
+  local_cpa_error: string
+  is_dead: boolean
   is_failed_state: boolean
 }
 
