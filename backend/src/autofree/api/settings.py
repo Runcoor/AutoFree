@@ -293,7 +293,7 @@ def post_proxy_test(_user=Depends(require_user)) -> dict:
     proxy_url = server.replace("http://", f"http://{user_enc}:{pwd_enc}@", 1)
 
     logger.info(
-        "[proxy/test] 测试代理 server=%s user_full=%s pwd_len=%d",
+        "[proxy/test] server=%s username=%s password_len=%d (params 已挂在密码上)",
         server, user, len(pwd),
     )
 
@@ -308,15 +308,16 @@ def post_proxy_test(_user=Depends(require_user)) -> dict:
     except httpx.ProxyError as exc:
         msg = str(exc)
         if "407" in msg:
+            base_pwd = pwd.split('_country-')[0].split('_session-')[0].split('_lifetime-')[0]
             raise HTTPException(
                 502,
-                "代理认证失败(407)— 三个可能原因:\n"
-                "  1. username/password 错(请到 IPRoyal Endpoint Generator 重新复制)\n"
-                "  2. 你填的 username 里已经包含了 _country-X_session-X_lifetime-X 后缀,"
-                "代码会自动追加导致重复 — 只填**最基础那段**(冒号前的随机字符串),不要带任何 _country-/_session-/_lifetime-\n"
-                "  3. IPRoyal 后台认证方式是 IP Whitelist Only,需改成 Username/Password\n"
-                f"\n当前 launch 用户名 = {user}\n"
-                f"基础用户名 = {user.split('_country-')[0].split('_session-')[0].split('_lifetime-')[0]}",
+                "代理认证失败(407)— 检查这几项:\n"
+                "  1. IPRoyal 格式是 USERNAME:PASSWORD_params,参数挂在密码末尾(代码已自动追加)\n"
+                "  2. 你只需填 IPRoyal 给的最基础 username + 最基础 password,**不要带任何参数后缀**\n"
+                "  3. IPRoyal 后台认证方式必须是 Username/Password(不能是 IP Whitelist Only)\n"
+                f"\n当前 username = {user}\n"
+                f"当前完整 password = {pwd}\n"
+                f"基础 password(剥离参数后) = {base_pwd}",
             ) from exc
         raise HTTPException(502, f"代理测试失败: {exc!r}") from exc
     except Exception as exc:

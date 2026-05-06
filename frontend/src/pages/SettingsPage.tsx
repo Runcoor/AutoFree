@@ -269,18 +269,19 @@ function ProxyCard() {
           hint="住宅默认 12321,移动默认 8080"
         />
         <Input
-          label="用户名(只填基础那段!)"
+          label="用户名"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
-          placeholder="如 AQgmLM2Rj... — 不要带 _country-X / _session-X / _lifetime-X"
-          hint="只填冒号前的基础随机字符串 · country/session/lifetime 由代码自动追加,带了会重复 → 407"
+          placeholder="IPRoyal 给的 username(冒号前的随机字符串)"
+          hint="原样填入,不需要带任何参数"
         />
         <Input
-          label="密码"
+          label="密码(只填基础那段!)"
           type="password"
-          placeholder={cfg?.has_password ? `已设置(${cfg.password_masked}) · 留空不改` : '未设置'}
+          placeholder={cfg?.has_password ? `已设置(${cfg.password_masked}) · 留空不改` : 'IPRoyal 给的 password(冒号后的)'}
           value={password}
           onChange={(e) => setPassword(e.target.value)}
+          hint="只填基础密码 · IPRoyal 的 country/session/lifetime 参数挂在密码末尾,代码自动追加,带了会重复 → 407"
         />
         <Input
           label="Country(锁定国家)"

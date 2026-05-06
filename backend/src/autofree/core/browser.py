@@ -56,8 +56,10 @@ def _strip_iproyal_params(username: str) -> str:
 def get_proxy_options(session_id: str | None = None) -> dict | None:
     """返回 Playwright launch 用的 proxy 字典,未启用 / 配置不全 → None。
 
-    session_id 注入到 username 末尾(`_session-XXX_lifetime-YY`),每个 launch 一个。
-    自动剥离用户填的 username 里已有的 country-/session-/lifetime- 后缀,避免重复。
+    IPRoyal 的格式:`USERNAME:PASSWORD_country-X_session-Y_lifetime-Z`
+    —— 参数挂在**密码**末尾(用 `_` 拼接),不是用户名。
+    我们存原始 username 和原始 password,launch 时把 country/session/lifetime
+    追加到 password 后面。如果用户填的 password 已带参数后缀,自动剥离。
     """
     try:
         from autofree.core.config import get_proxy_config
@@ -69,31 +71,29 @@ def get_proxy_options(session_id: str | None = None) -> dict | None:
     if not cfg["enabled"]:
         return None
     host, port = cfg["host"], cfg["port"]
-    user_raw, pwd = cfg["username"], cfg["password"]
-    if not (host and port and user_raw and pwd):
+    user, pwd_raw = cfg["username"], cfg["password"]
+    if not (host and port and user and pwd_raw):
         logger.warning("[browser] proxy 启用但配置不全(host/port/user/pwd 必填)")
         return None
 
-    base_user = _strip_iproyal_params(user_raw)
-    if base_user != user_raw:
-        logger.info(
-            "[browser] proxy username 自动剥离参数后缀: %r → %r",
-            user_raw, base_user,
-        )
+    base_pwd = _strip_iproyal_params(pwd_raw)
+    if base_pwd != pwd_raw:
+        logger.info("[browser] proxy password 自动剥离参数后缀(原长度=%d,剥离后长度=%d)",
+                    len(pwd_raw), len(base_pwd))
 
-    parts = [base_user]
+    parts = [base_pwd]
     if cfg["country"]:
         parts.append(f"country-{cfg['country']}")
     if session_id:
         parts.append(f"session-{session_id}")
     if cfg["lifetime"]:
         parts.append(f"lifetime-{cfg['lifetime']}")
-    full_user = "_".join(parts)
+    full_pwd = "_".join(parts)
 
     return {
         "server": f"http://{host}:{port}",
-        "username": full_user,
-        "password": pwd,
+        "username": user,
+        "password": full_pwd,
     }
 
 
