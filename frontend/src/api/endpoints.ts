@@ -25,6 +25,33 @@ export interface SmsCfg {
 }
 export interface CpaCfg { url: string; key_masked: string; has_key: boolean; enabled: boolean; msg?: string }
 
+export interface ProxyCfg {
+  enabled: boolean
+  provider: string  // 'iproyal-residential' | 'iproyal-mobile' | 'custom'
+  providers_known: string[]
+  provider_defaults: Record<string, { host: string; port: string; country: string; lifetime: string }>
+  host: string
+  port: string
+  username: string
+  password_masked: string
+  has_password: boolean
+  country: string
+  lifetime: string
+  msg?: string
+}
+
+export interface ProxyTestResult {
+  ok: boolean
+  ip: string
+  country: string
+  region: string
+  city: string
+  org: string
+  timezone: string
+  session_user: string
+  raw: any
+}
+
 export const settingsApi = {
   getCloudMail: () => api.get<CloudMailCfg>('/settings/cloud-mail').then(r => r.data),
   putCloudMail: (body: Partial<{ base_url: string; password: string }>) =>
@@ -44,6 +71,12 @@ export const settingsApi = {
   getCpa: () => api.get<CpaCfg>('/settings/cpa').then(r => r.data),
   putCpa: (body: Partial<{ url: string; key: string; enabled: boolean }>) =>
     api.put<CpaCfg>('/settings/cpa', body).then(r => r.data),
+  getProxy: () => api.get<ProxyCfg>('/settings/proxy').then(r => r.data),
+  putProxy: (body: Partial<{
+    enabled: boolean; provider: string; host: string; port: string
+    username: string; password: string; country: string; lifetime: string
+  }>) => api.put<ProxyCfg>('/settings/proxy', body).then(r => r.data),
+  proxyTest: () => api.post<ProxyTestResult>('/settings/proxy/test').then(r => r.data),
 }
 
 // ─── domains ────────────────────────────────────────────────

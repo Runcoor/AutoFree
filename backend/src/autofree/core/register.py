@@ -17,7 +17,9 @@ from autofree.core.browser import (
     first_visible_editable,
     get_context_options,
     get_launch_options,
+    get_proxy_options,
     is_google_redirect,
+    make_proxy_session_id,
     page_excerpt,
     safe_screenshot,
     wait_cloudflare,
@@ -494,8 +496,15 @@ def register_account(mail_client, email: str, password: str) -> tuple[bool, str 
     mail_baseline_id = mail_client.latest_mail_id(email)
     logger.info("[register] 开始 %s (mail_baseline_id=%d)", email, mail_baseline_id)
 
+    proxy_session_id = make_proxy_session_id(prefix=email.split("@", 1)[0])
+    proxy_opts = get_proxy_options(session_id=proxy_session_id)
+    launch_kwargs = get_launch_options()
+    if proxy_opts:
+        launch_kwargs["proxy"] = proxy_opts
+        logger.info("[register] 使用代理 session=%s server=%s", proxy_session_id, proxy_opts["server"])
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(**get_launch_options())
+        browser = p.chromium.launch(**launch_kwargs)
         context = browser.new_context(**get_context_options())
         page = context.new_page()
 

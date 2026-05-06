@@ -1,10 +1,10 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import {
-  Trash2, Plus, KeyRound, Mail, MessageSquare, Cloud, Globe, RefreshCw, Lock, Check,
+  Trash2, Plus, KeyRound, Mail, MessageSquare, Cloud, Globe, RefreshCw, Lock, Check, Shield, Zap,
 } from 'lucide-react'
 import {
   authApi, domainsApi, settingsApi,
-  type CloudMailCfg, type CpaCfg, type Domain, type SmsCfg,
+  type CloudMailCfg, type CpaCfg, type Domain, type ProxyCfg, type ProxyTestResult, type SmsCfg,
 } from '../api/endpoints'
 import { Button, Card, CardBody, CardHeader, Input, Pill, Switch, useToast } from '../components/ui'
 
@@ -18,6 +18,7 @@ export function SettingsPage() {
 
       <PasswordCard />
       <CloudMailCard />
+      <ProxyCard />
       <SmsCard />
       <CpaCard />
       <DomainsCard />
@@ -129,6 +130,211 @@ function CloudMailCard() {
         <Check className="w-3.5 h-3.5" />
         保存
       </Button>
+    </SettingsCard>
+  )
+}
+
+// ─────────────────── Proxy ───────────────────
+const PROXY_PROVIDER_LABEL: Record<string, string> = {
+  'iproyal-residential': 'IPRoyal · 住宅(geo.iproyal.com)',
+  'iproyal-mobile': 'IPRoyal · 4G 移动(mobile.iproyal.com)',
+  custom: '自定义 HTTP 代理',
+}
+
+function ProxyCard() {
+  const [cfg, setCfg] = useState<ProxyCfg | null>(null)
+  const [enabled, setEnabled] = useState(false)
+  const [provider, setProvider] = useState('iproyal-residential')
+  const [host, setHost] = useState('')
+  const [port, setPort] = useState('')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [country, setCountry] = useState('us')
+  const [lifetime, setLifetime] = useState('30m')
+  const [busy, setBusy] = useState(false)
+  const [testBusy, setTestBusy] = useState(false)
+  const [testResult, setTestResult] = useState<ProxyTestResult | null>(null)
+  const push = useToast((s) => s.push)
+
+  useEffect(() => { load() }, [])
+  async function load() {
+    const c = await settingsApi.getProxy()
+    setCfg(c)
+    setEnabled(c.enabled)
+    setProvider(c.provider)
+    setHost(c.host)
+    setPort(c.port)
+    setUsername(c.username)
+    setCountry(c.country || 'us')
+    setLifetime(c.lifetime || '30m')
+  }
+
+  // 切换 provider 自动填默认 host/port
+  function selectProvider(p: string) {
+    setProvider(p)
+    const d = cfg?.provider_defaults?.[p]
+    if (d) {
+      if (d.host) setHost(d.host)
+      if (d.port) setPort(d.port)
+      if (d.country && !country) setCountry(d.country)
+      if (d.lifetime && !lifetime) setLifetime(d.lifetime)
+    }
+  }
+
+  async function save() {
+    setBusy(true)
+    try {
+      const body: any = { enabled, provider, host, port, username, country, lifetime }
+      if (password) body.password = password
+      const r = await settingsApi.putProxy(body)
+      setCfg(r); setPassword('')
+      push('已保存', 'success')
+    } catch (err: any) {
+      push(err?.response?.data?.detail || '保存失败', 'danger')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function test() {
+    setTestBusy(true)
+    setTestResult(null)
+    try {
+      const r = await settingsApi.proxyTest()
+      setTestResult(r)
+      push(`✅ 出口 IP: ${r.ip} · ${r.city}, ${r.region}, ${r.country}`, 'success')
+    } catch (err: any) {
+      push(err?.response?.data?.detail || '测试失败', 'danger')
+    } finally {
+      setTestBusy(false)
+    }
+  }
+
+  return (
+    <SettingsCard
+      icon={<Shield size={18} />}
+      title="代理 (Proxy)"
+      subtitle="VPS → 住宅 IP 代理 · 同一号注册全程同 IP · 不同号自动换 IP(避免 WhatsApp OTP)"
+      delay={60}
+    >
+      {/* 启用 + provider 选择 */}
+      <div className="flex items-center gap-3 mb-4 flex-wrap">
+        <Switch on={enabled} onChange={setEnabled} ariaLabel="启用代理" />
+        <span className="text-[13px] font-medium">{enabled ? '已启用' : '未启用'}</span>
+        {cfg && (
+          <Pill tone={cfg.enabled ? 'success' : 'muted'}>
+            {cfg.enabled ? '当前生效' : '当前关闭'}
+          </Pill>
+        )}
+        <span className="text-[11px] text-ink-faint ml-auto">
+          推荐:VPS 上注册 OpenAI 必须开,否则触发 WhatsApp OTP
+        </span>
+      </div>
+
+      {/* 类型下拉 */}
+      <div className="mb-4">
+        <label className="text-[12px] text-ink-soft mb-1.5 block">代理类型</label>
+        <div className="flex gap-2 flex-wrap">
+          {Object.keys(PROXY_PROVIDER_LABEL).map((p) => (
+            <button
+              key={p}
+              type="button"
+              onClick={() => selectProvider(p)}
+              className={
+                'btn ' +
+                (provider === p ? 'btn-primary' : 'btn-ghost') +
+                ' !h-[28px] !px-3 !text-[12px]'
+              }
+            >
+              {provider === p && <Check className="w-3 h-3" />}
+              {PROXY_PROVIDER_LABEL[p]}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2 mb-3.5">
+        <Input
+          label="Host"
+          value={host}
+          onChange={(e) => setHost(e.target.value)}
+          placeholder="geo.iproyal.com"
+          hint="IPRoyal 住宅:geo.iproyal.com · 移动:mobile.iproyal.com"
+        />
+        <Input
+          label="Port"
+          value={port}
+          onChange={(e) => setPort(e.target.value)}
+          placeholder="12321"
+          hint="住宅默认 12321,移动默认 8080"
+        />
+        <Input
+          label="用户名"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          placeholder="iproyal 仪表盘的 username"
+          hint="基础用户名,session/lifetime 由后端自动追加"
+        />
+        <Input
+          label="密码"
+          type="password"
+          placeholder={cfg?.has_password ? `已设置(${cfg.password_masked}) · 留空不改` : '未设置'}
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+        <Input
+          label="Country(锁定国家)"
+          value={country}
+          onChange={(e) => setCountry(e.target.value.toLowerCase().trim())}
+          placeholder="us"
+          hint="ISO 国家码小写 · 留空 = 不锁(全球随机) · 推荐 us"
+        />
+        <Input
+          label="Lifetime(粘性时长)"
+          value={lifetime}
+          onChange={(e) => setLifetime(e.target.value.toLowerCase().trim())}
+          placeholder="30m"
+          hint="同一号全程同 IP 的时长 · 住宅最大 30m"
+        />
+      </div>
+
+      <div className="flex items-center gap-2 flex-wrap mb-3">
+        <Button variant="primary" onClick={save} loading={busy}>
+          <Check className="w-3.5 h-3.5" />
+          保存
+        </Button>
+        <Button onClick={test} loading={testBusy} disabled={!cfg?.enabled && !enabled}>
+          <Zap className="w-3.5 h-3.5" />
+          测试连接(查出口 IP)
+        </Button>
+        {!enabled && (
+          <span className="text-[11px] text-ink-faint">先勾选启用并保存,才能测试</span>
+        )}
+      </div>
+
+      {/* 测试结果 */}
+      {testResult && (
+        <div
+          className="rounded-[10px] border p-3 mt-2 text-[12px]"
+          style={{ borderColor: 'var(--success)', background: 'rgba(16,185,129,0.06)' }}
+        >
+          <div className="font-semibold mb-1.5 flex items-center gap-1.5">
+            <Check className="w-3.5 h-3.5" /> 代理生效中
+          </div>
+          <div className="grid gap-1 mono">
+            <div><span className="text-ink-faint">出口 IP: </span>{testResult.ip}</div>
+            <div>
+              <span className="text-ink-faint">位置: </span>
+              {testResult.city}, {testResult.region}, {testResult.country}
+              <span className="text-ink-faint"> · 时区 {testResult.timezone}</span>
+            </div>
+            <div><span className="text-ink-faint">ISP: </span>{testResult.org}</div>
+            <div className="text-[10px] text-ink-faint break-all">
+              session_user: {testResult.session_user}
+            </div>
+          </div>
+        </div>
+      )}
     </SettingsCard>
   )
 }

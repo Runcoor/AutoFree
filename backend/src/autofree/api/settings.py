@@ -14,9 +14,12 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from autofree.core.config import (
+    PROXY_PROVIDER_DEFAULTS,
+    PROXY_PROVIDERS_KNOWN,
     SMS_PROVIDERS_KNOWN,
     get_cpa_config,
     get_mail_config,
+    get_proxy_config,
     get_sms_config,
     get_sms_provider_config,
     write_setting_group,
@@ -212,6 +215,104 @@ def get_cpa(_user=Depends(require_user)) -> dict:
         "has_key": bool(cfg["key"]),
         "enabled": cfg["enabled"],
     }
+
+
+# ─────────────────────────── proxy ───────────────────────────
+
+class ProxyParams(BaseModel):
+    enabled: Optional[bool] = None
+    provider: Optional[str] = None  # iproyal-residential / iproyal-mobile / custom
+    host: Optional[str] = None
+    port: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+    country: Optional[str] = None
+    lifetime: Optional[str] = None
+
+
+def _proxy_response(*, msg: Optional[str] = None) -> dict:
+    cfg = get_proxy_config()
+    body = {
+        "enabled": cfg["enabled"],
+        "provider": cfg["provider"],
+        "providers_known": list(PROXY_PROVIDERS_KNOWN),
+        "provider_defaults": PROXY_PROVIDER_DEFAULTS,
+        "host": cfg["host"],
+        "port": cfg["port"],
+        "username": cfg["username"],
+        "password_masked": _mask(cfg["password"]),
+        "has_password": bool(cfg["password"]),
+        "country": cfg["country"],
+        "lifetime": cfg["lifetime"],
+    }
+    if msg:
+        body["msg"] = msg
+    return body
+
+
+@router.get("/proxy")
+def get_proxy(_user=Depends(require_user)) -> dict:
+    return _proxy_response()
+
+
+@router.put("/proxy")
+def put_proxy(params: ProxyParams, _user=Depends(require_user)) -> dict:
+    body = params.model_dump(exclude_none=True)
+    if "provider" in body:
+        p = body["provider"].strip().lower()
+        if p not in PROXY_PROVIDERS_KNOWN:
+            raise HTTPException(400, f"未知 provider: {p!r} — 支持: {', '.join(PROXY_PROVIDERS_KNOWN)}")
+        body["provider"] = p
+    body = _filter_blank_secret(body, ["password"])
+    if body:
+        write_setting_group("proxy", body)
+    return _proxy_response(msg="已保存")
+
+
+@router.post("/proxy/test")
+def post_proxy_test(_user=Depends(require_user)) -> dict:
+    """实际通过代理 GET ipinfo.io/json — 验证代理可用并返出口 IP / 城市 / 州。"""
+    import httpx
+
+    from autofree.core.browser import get_proxy_options, make_proxy_session_id
+
+    cfg = get_proxy_config()
+    if not cfg["enabled"]:
+        raise HTTPException(400, "代理未启用 — 请先勾选启用并填写凭证")
+    opts = get_proxy_options(session_id=make_proxy_session_id("test"))
+    if not opts:
+        raise HTTPException(400, "代理配置不全(host / port / 用户名 / 密码 必填)")
+
+    server = opts["server"]
+    user = opts["username"]
+    pwd = opts["password"]
+    proxy_url = server.replace("http://", f"http://{user}:{pwd}@", 1)
+
+    try:
+        with httpx.Client(
+            proxy=proxy_url, timeout=20.0,
+            headers={"User-Agent": "AutoFree/proxy-test"},
+        ) as cli:
+            resp = cli.get("https://ipinfo.io/json")
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        raise HTTPException(502, f"代理测试失败: {exc!r}") from exc
+
+    return {
+        "ok": True,
+        "ip": data.get("ip"),
+        "country": data.get("country"),
+        "region": data.get("region"),
+        "city": data.get("city"),
+        "org": data.get("org"),
+        "timezone": data.get("timezone"),
+        "session_user": user,  # 便于在 IPRoyal 后台查日志
+        "raw": data,
+    }
+
+
+# ─────────────────────────── cpa (continued) ───────────────────────────
 
 
 @router.put("/cpa")

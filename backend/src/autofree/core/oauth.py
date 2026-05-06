@@ -27,7 +27,9 @@ from autofree.core.browser import (
     detect_phone_block,
     get_context_options,
     get_launch_options,
+    get_proxy_options,
     is_google_redirect,
+    make_proxy_session_id,
     safe_screenshot,
 )
 from autofree.core.config import EMAIL_POLL_TIMEOUT, SCREENSHOT_DIR, get_sms_config
@@ -1097,8 +1099,15 @@ def fetch_personal_bundle(
 
     auth_code: list[str | None] = [None]
 
+    proxy_session_id = make_proxy_session_id(prefix=email.split("@", 1)[0])
+    proxy_opts = get_proxy_options(session_id=proxy_session_id)
+    launch_kwargs = get_launch_options()
+    if proxy_opts:
+        launch_kwargs["proxy"] = proxy_opts
+        logger.info("[oauth] 使用代理 session=%s server=%s", proxy_session_id, proxy_opts["server"])
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(**get_launch_options())
+        browser = p.chromium.launch(**launch_kwargs)
         context = browser.new_context(**get_context_options())
 
         # 注:用 prompt=login 后, OpenAI 会强制走 /log-in 流程, session_token 注入和

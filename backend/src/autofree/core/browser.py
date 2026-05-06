@@ -8,9 +8,60 @@ from __future__ import annotations
 import logging
 import os
 import re
+import secrets
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def make_proxy_session_id(prefix: str = "") -> str:
+    """每个 launch 一个唯一 session_id ⇒ 同一号注册全程同一 IP,新号自动换 IP。
+
+    prefix(如邮箱前缀)便于在 IPRoyal 控制台日志里追踪。
+    """
+    rand = secrets.token_hex(5)  # 10 字符
+    if prefix:
+        # 只保留字母数字,IPRoyal session 参数允许的字符集有限
+        safe = re.sub(r"[^a-z0-9]", "", prefix.lower())[:8]
+        if safe:
+            return f"{safe}{rand}"
+    return rand
+
+
+def get_proxy_options(session_id: str | None = None) -> dict | None:
+    """返回 Playwright launch 用的 proxy 字典,未启用 / 配置不全 → None。
+
+    session_id 注入到 username 末尾(`_session-XXX_lifetime-YY`),每个 launch 一个。
+    """
+    try:
+        from autofree.core.config import get_proxy_config
+    except Exception as exc:
+        logger.debug("[browser] 读 proxy 配置失败: %s", exc)
+        return None
+
+    cfg = get_proxy_config()
+    if not cfg["enabled"]:
+        return None
+    host, port = cfg["host"], cfg["port"]
+    user, pwd = cfg["username"], cfg["password"]
+    if not (host and port and user and pwd):
+        logger.warning("[browser] proxy 启用但配置不全(host/port/user/pwd 必填)")
+        return None
+
+    parts = [user]
+    if cfg["country"]:
+        parts.append(f"country-{cfg['country']}")
+    if session_id:
+        parts.append(f"session-{session_id}")
+    if cfg["lifetime"]:
+        parts.append(f"lifetime-{cfg['lifetime']}")
+    full_user = "_".join(parts)
+
+    return {
+        "server": f"http://{host}:{port}",
+        "username": full_user,
+        "password": pwd,
+    }
 
 
 _PHONE_URL_HINTS = ("verify-phone", "add-phone", "/phone", "phone_verification", "phone-number")

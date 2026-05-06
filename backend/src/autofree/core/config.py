@@ -125,6 +125,57 @@ def get_sms_provider_config(provider: str) -> dict:
     }
 
 
+PROXY_PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
+    "iproyal-residential": {
+        "host": "geo.iproyal.com",
+        "port": "12321",
+        "country": "us",
+        "lifetime": "30m",
+    },
+    "iproyal-mobile": {
+        "host": "mobile.iproyal.com",
+        "port": "8080",
+        "country": "us",
+        "lifetime": "30m",
+    },
+    "custom": {
+        "host": "",
+        "port": "",
+        "country": "",
+        "lifetime": "",
+    },
+}
+PROXY_PROVIDERS_KNOWN = tuple(PROXY_PROVIDER_DEFAULTS.keys())
+
+
+def get_proxy_config() -> dict:
+    """读 proxy 配置(单一 namespace,不分多 provider 实例)。
+
+    存储:
+      - proxy.enabled         '1' | '0'
+      - proxy.provider        'iproyal-residential' | 'iproyal-mobile' | 'custom'
+      - proxy.host / .port / .username / .password
+      - proxy.country         'us' / '' (空 = 不锁国家)
+      - proxy.lifetime        '30m' (sticky 时长)
+    """
+    g = _read_setting_group("proxy")
+    provider = (g.get("provider") or "iproyal-residential").strip().lower()
+    if provider not in PROXY_PROVIDER_DEFAULTS:
+        provider = "iproyal-residential"
+    defaults = PROXY_PROVIDER_DEFAULTS[provider]
+    enabled_raw = (g.get("enabled") or "").strip().lower()
+    return {
+        "enabled": enabled_raw in ("1", "true", "yes", "on"),
+        "provider": provider,
+        "host": (g.get("host") or defaults["host"]).strip(),
+        "port": (g.get("port") or defaults["port"]).strip(),
+        "username": (g.get("username") or "").strip(),
+        "password": (g.get("password") or "").strip(),
+        "country": (g.get("country") or defaults["country"]).strip().lower(),
+        "lifetime": (g.get("lifetime") or defaults["lifetime"]).strip().lower(),
+    }
+
+
 def get_cpa_config() -> dict:
     g = _read_setting_group("cpa")
     enabled_raw = (g.get("enabled") or "").strip().lower()
