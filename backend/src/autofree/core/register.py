@@ -180,13 +180,25 @@ def _fill_password(page, password: str) -> None:
 
 
 def _fill_otp(page, mail_client, email: str, *, mail_baseline_id: int) -> None:
-    """等 OTP 邮件并填入。"""
+    """等 OTP 邮件并填入 — 如果当前在 code 步骤,**必须**填,失败抛错。
+
+    避免静默 return 导致下游误把空 code 页提交。
+    """
+    step = _detect_step(page)
+    if step != "code":
+        # 不在 code 步骤 — 多等一会儿确认(SPA 渲染慢)
+        if _wait_step_in(page, {"code"}, timeout=8) != "code":
+            logger.info("[register] OTP 步骤未出现 — 流程不需要 OTP")
+            return
+
+    # 已确认在 code 步骤 — 显式等输入框出现,失败抛错
     try:
         ci = page.locator(_CODE_SELECTORS).first
-        if not ci.is_visible(timeout=5000):
-            return  # 没要 OTP 直接过
-    except Exception:
-        return
+        ci.wait_for(state="visible", timeout=10000)
+    except Exception as exc:
+        raise RegisterFailed(
+            f"识别到 code 步骤但 OTP 输入框未渲染: {exc} | URL={page.url}",
+        ) from exc
 
     logger.info("[register] 等待 OTP 邮件 (after_id=%d, timeout=%ds)", mail_baseline_id, EMAIL_POLL_TIMEOUT)
     _, code = mail_client.wait_for_otp(
@@ -197,7 +209,14 @@ def _fill_otp(page, mail_client, email: str, *, mail_baseline_id: int) -> None:
     logger.info("[register] 输入 OTP: %s", code)
     type_otp_code(page, ci, code)
     click_primary_button(page, ci, ["Continue", "继续"])
-    time.sleep(8)
+
+    # 等离开 code 步骤(8s 内),否则说明填的 OTP 有问题 / 没填进去
+    next_step = _wait_step_change(page, "code", timeout=12)
+    if next_step == "code":
+        raise RegisterFailed(
+            f"OTP 提交后仍在 code 步骤 — OTP 可能没填进去 / 验证码无效 | URL={page.url}",
+        )
+    logger.info("[register] OTP 提交后步骤: %s", next_step)
 
 
 _NAME_SELECTORS = (
