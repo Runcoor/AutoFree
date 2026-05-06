@@ -369,6 +369,34 @@ def wait_cloudflare(page, max_wait_seconds: int = 120) -> bool:
     return False
 
 
+def type_otp_code(page, ci, code: str) -> None:
+    """适配单框 OTP 与 6 格数字盒子两种 UI。
+
+    新版 OpenAI 用 6 个 maxlength=1 的 input,fill() 只能填第一格(剩 5 格空)
+    → 提交后报"验证码是必需的"。先 fill 一次,如果实际值不等于 code,
+    切换到 click + keyboard.type(浏览器自动 focus 跳到下一格)。
+    """
+    import time as _t
+
+    try:
+        ci.fill(code)
+        _t.sleep(0.3)
+        actual = ci.input_value(timeout=1500)
+        if actual == code:
+            return
+        logger.info("[otp] 单框 fill 失败(实际值=%r,期望=%r),切换分格输入", actual, code)
+    except Exception as exc:
+        logger.debug("[otp] fill 异常,fallback 到 keyboard.type: %s", exc)
+
+    try:
+        ci.click()
+        _t.sleep(0.2)
+        page.keyboard.type(code, delay=80)
+        _t.sleep(0.5)
+    except Exception as exc:
+        logger.warning("[otp] keyboard.type 异常: %s", exc)
+
+
 def first_visible_editable(page, selectors: str, timeout: int = 800):
     try:
         loc = page.locator(selectors).first

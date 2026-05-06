@@ -22,6 +22,7 @@ from autofree.core.browser import (
     make_proxy_session_id,
     page_excerpt,
     safe_screenshot,
+    type_otp_code,
     wait_cloudflare,
 )
 from autofree.core.config import EMAIL_POLL_TIMEOUT, SCREENSHOT_DIR
@@ -194,8 +195,7 @@ def _fill_otp(page, mail_client, email: str, *, mail_baseline_id: int) -> None:
         timeout=EMAIL_POLL_TIMEOUT,
     )
     logger.info("[register] 输入 OTP: %s", code)
-    ci.fill(code)
-    time.sleep(0.5)
+    type_otp_code(page, ci, code)
     click_primary_button(page, ci, ["Continue", "继续"])
     time.sleep(8)
 

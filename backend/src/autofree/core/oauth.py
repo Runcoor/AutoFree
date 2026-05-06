@@ -31,6 +31,7 @@ from autofree.core.browser import (
     is_google_redirect,
     make_proxy_session_id,
     safe_screenshot,
+    type_otp_code,
 )
 from autofree.core.config import EMAIL_POLL_TIMEOUT, SCREENSHOT_DIR, get_sms_config
 from autofree.core.control import is_stop_requested
@@ -300,14 +301,16 @@ def _login_form_walk(page, email: str, password: str, mail_client, mail_baseline
 
     # OAuth 登录可能要求"新设备 OTP",从邮件取
     try:
-        ci = page.locator('input[name="code"], input[autocomplete="one-time-code"]').first
+        ci = page.locator(
+            'input[name="code"], input[autocomplete*="one-time-code" i], '
+            'input[placeholder*="验证码"], input[inputmode="numeric"]',
+        ).first
         if ci.is_visible(timeout=5000):
             logger.info("[oauth] OAuth 要求 OTP,等待邮件 (after_id=%d)", mail_baseline_id)
             _, otp = mail_client.wait_for_otp(
                 email, after_id=mail_baseline_id, timeout=EMAIL_POLL_TIMEOUT,
             )
-            ci.fill(otp)
-            time.sleep(0.5)
+            type_otp_code(page, ci, otp)
             page.locator('button:has-text("Continue"), button:has-text("继续"), button[type="submit"]').first.click()
             time.sleep(5)
     except Exception as exc:
@@ -434,8 +437,7 @@ def _login_form_walk_email_only(page, email: str, mail_client, mail_baseline_id:
 
     try:
         ci = page.locator(code_locator).first
-        ci.fill(otp)
-        time.sleep(0.5)
+        type_otp_code(page, ci, otp)
         page.locator(
             'button:has-text("Continue"), button:has-text("继续"), button[type="submit"]',
         ).first.click()
