@@ -272,6 +272,8 @@ def put_proxy(params: ProxyParams, _user=Depends(require_user)) -> dict:
 @router.post("/proxy/test")
 def post_proxy_test(_user=Depends(require_user)) -> dict:
     """实际通过代理 GET ipinfo.io/json — 验证代理可用并返出口 IP / 城市 / 州。"""
+    import urllib.parse
+
     import httpx
 
     from autofree.core.browser import get_proxy_options, make_proxy_session_id
@@ -286,7 +288,10 @@ def post_proxy_test(_user=Depends(require_user)) -> dict:
     server = opts["server"]
     user = opts["username"]
     pwd = opts["password"]
-    proxy_url = server.replace("http://", f"http://{user}:{pwd}@", 1)
+    # URL 编码用户名/密码,避免特殊字符(@ / : % 等)破坏 URL 解析
+    user_enc = urllib.parse.quote(user, safe="")
+    pwd_enc = urllib.parse.quote(pwd, safe="")
+    proxy_url = server.replace("http://", f"http://{user_enc}:{pwd_enc}@", 1)
 
     try:
         with httpx.Client(
@@ -296,6 +301,16 @@ def post_proxy_test(_user=Depends(require_user)) -> dict:
             resp = cli.get("https://ipinfo.io/json")
             resp.raise_for_status()
             data = resp.json()
+    except httpx.ProxyError as exc:
+        msg = str(exc)
+        if "407" in msg:
+            raise HTTPException(
+                502,
+                f"代理认证失败(407)— 请到 IPRoyal 后台 Endpoint Generator 复制正确的 "
+                f"username/password,并确认认证方式是 Username/Password 而不是 IP Whitelist Only。"
+                f" 当前 username 前缀 = {user.split('_')[0][:8]}***",
+            ) from exc
+        raise HTTPException(502, f"代理测试失败: {exc!r}") from exc
     except Exception as exc:
         raise HTTPException(502, f"代理测试失败: {exc!r}") from exc
 
