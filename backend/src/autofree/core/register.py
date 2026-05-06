@@ -184,18 +184,23 @@ def _fill_otp(page, mail_client, email: str, *, mail_baseline_id: int) -> None:
 
     避免静默 return 导致下游误把空 code 页提交。
     """
+    logger.info("[register] >>> _fill_otp 入口 URL=%s", page.url)
     step = _detect_step(page)
+    logger.info("[register] _detect_step → %s", step)
+
     if step != "code":
-        # 不在 code 步骤 — 多等一会儿确认(SPA 渲染慢)
         if _wait_step_in(page, {"code"}, timeout=8) != "code":
             logger.info("[register] OTP 步骤未出现 — 流程不需要 OTP")
             return
+        logger.info("[register] 等到 code 步骤")
 
     # 已确认在 code 步骤 — 显式等输入框出现,失败抛错
     try:
         ci = page.locator(_CODE_SELECTORS).first
         ci.wait_for(state="visible", timeout=10000)
+        logger.info("[register] OTP 输入框已可见")
     except Exception as exc:
+        safe_screenshot(page, SCREENSHOT_DIR / "05a_code_no_input.png")
         raise RegisterFailed(
             f"识别到 code 步骤但 OTP 输入框未渲染: {exc} | URL={page.url}",
         ) from exc
@@ -206,26 +211,45 @@ def _fill_otp(page, mail_client, email: str, *, mail_baseline_id: int) -> None:
         after_id=mail_baseline_id,
         timeout=EMAIL_POLL_TIMEOUT,
     )
-    logger.info("[register] 输入 OTP: %s", code)
+    logger.info("[register] 收到 OTP: %r (长度=%d)", code, len(code or ""))
+
+    if not code or not code.strip():
+        raise RegisterFailed(f"cloud-mail 返回空 OTP | URL={page.url}")
+
     try:
         type_otp_code(page, ci, code)
     except RuntimeError as exc:
-        # type_otp_code 内部已确保填值或 raise — 走到这里说明 OTP 真没填进去,
-        # 绝对不能 click Continue(空字符串提交会被 OpenAI 报"verification code is required"
-        # 然后下游误判流程异常)
+        safe_screenshot(page, SCREENSHOT_DIR / "05b_otp_fill_failed.png")
         raise RegisterFailed(f"OTP 填写失败: {exc} | URL={page.url}") from exc
 
+    # 点 Continue 之前最后校验一次 — 任何空值都直接抛错,绝不空提交
+    try:
+        pre_submit_value = ci.input_value(timeout=1500)
+        logger.info("[register] click Continue 前最终值=%r", pre_submit_value)
+    except Exception:
+        pre_submit_value = None
+    # 6 格 UI:value 只是首字符;单框 UI:value 应等于 code
+    valid_pre_submit = (
+        pre_submit_value == code
+        or (pre_submit_value and len(pre_submit_value) == 1 and code.startswith(pre_submit_value))
+    )
+    if not valid_pre_submit:
+        safe_screenshot(page, SCREENSHOT_DIR / "05c_pre_submit_empty.png")
+        raise RegisterFailed(
+            f"OTP 准备提交前 input value 为 {pre_submit_value!r}(期望 {code!r})— "
+            f"绝不空提交。截图 05c_pre_submit_empty.png | URL={page.url}",
+        )
+
+    logger.info("[register] click Continue 提交 OTP")
     click_primary_button(page, ci, ["Continue", "继续"])
 
-    # 等离开 code 步骤(8s 内),否则说明填的 OTP 有问题 / 没填进去
     next_step = _wait_step_change(page, "code", timeout=12)
     if next_step == "code":
-        # 仍在 code 步骤 — 截图便于排查
-        safe_screenshot(page, SCREENSHOT_DIR / "05a_code_stuck.png")
+        safe_screenshot(page, SCREENSHOT_DIR / "05d_code_stuck.png")
         raise RegisterFailed(
-            f"OTP 提交后仍在 code 步骤 — OTP 可能无效 / 已过期 / 浏览器卡住 | URL={page.url}",
+            f"OTP 提交后仍在 code 步骤 — OTP 无效 / 已过期 / OpenAI 拒收 | URL={page.url}",
         )
-    logger.info("[register] OTP 提交后步骤: %s", next_step)
+    logger.info("[register] OTP 提交成功,新步骤=%s URL=%s", next_step, page.url)
 
 
 _NAME_SELECTORS = (

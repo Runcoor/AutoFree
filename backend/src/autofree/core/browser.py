@@ -373,65 +373,79 @@ def type_otp_code(page, ci, code: str) -> None:
     """填 OTP 验证码 — 用真实键盘事件确保 React state 更新。
 
     踩过的坑:
-    1. `Locator.fill()` 把值塞进 DOM 但 React 的 controlled input 不更新内部 state,
-       提交时 React 看到的值还是空 → "verification code is required"
-    2. 6 格分隔 UI:fill 只能填第一格(maxlength=1)
-    3. clean 残值:click 后先 Ctrl+A / Backspace 清空再敲
+    1. `Locator.fill()` 塞 DOM 不触发 React onChange → 提交时 React state 仍空
+    2. 6 格 UI:fill 只能填第一格(maxlength=1)
+    3. 残值:click 后先清空再敲
 
-    解决:`click → 清空 → keyboard.type` 模拟真人,React 接收 input 事件 → state 同步
-    填完读 input_value 验证,不一致直接 raise(让上游抛 RegisterFailed,绝不空提交)
+    用 `Locator.press_sequentially`(Playwright 官方推荐),逐字符按真实键盘事件
+    输入,React 一定收到。整个过程加详细日志便于排查。
     """
     import time as _t
 
+    logger.info("[otp] >>> type_otp_code 开始 code=%s", code)
+
     try:
         ci.click()
+        logger.info("[otp] click 成功")
         _t.sleep(0.15)
     except Exception as exc:
         raise RuntimeError(f"OTP 输入框无法 click: {exc}") from exc
 
-    # 清空已有内容(可能是 placeholder 残留 / 之前的 fill)
+    # 清空已有内容
     try:
         ci.press("ControlOrMeta+a", timeout=1000)
         ci.press("Backspace", timeout=1000)
+        logger.info("[otp] 清空残值完成")
         _t.sleep(0.1)
     except Exception as exc:
         logger.debug("[otp] 清空残值失败(可忽略): %s", exc)
 
-    # 模拟真实键盘逐字符敲入(每次 80ms 间隔,触发 input/change 事件)
+    # press_sequentially — 官方推荐,逐字符 dispatch keyboard events,React 一定收到
     try:
-        page.keyboard.type(code, delay=80)
-        _t.sleep(0.6)
+        ci.press_sequentially(code, delay=100, timeout=10000)
+        logger.info("[otp] press_sequentially 完成 (%d 个字符)", len(code))
+        _t.sleep(0.8)  # 给 React state 更新一点时间
     except Exception as exc:
-        raise RuntimeError(f"OTP keyboard.type 异常: {exc}") from exc
+        logger.warning("[otp] press_sequentially 失败,fallback keyboard.type: %s", exc)
+        try:
+            page.keyboard.type(code, delay=100)
+            _t.sleep(0.8)
+        except Exception as exc2:
+            raise RuntimeError(f"OTP press_sequentially + keyboard.type 都失败: {exc2}") from exc2
 
-    # 验证 — 单框 UI 读 input_value
+    # 校验 — 读 input_value 看是否真的填进去
     try:
-        actual = ci.input_value(timeout=1500)
-    except Exception:
+        actual = ci.input_value(timeout=2000)
+    except Exception as exc:
+        logger.warning("[otp] 读 input_value 失败: %s", exc)
         actual = None
 
-    if actual and actual == code:
-        return  # 单框成功
+    logger.info("[otp] 校验:input_value=%r 期望=%r", actual, code)
 
-    # 单框值不匹配 → 可能是 6 格 UI(每格只 1 字符 → input_value 不会等于完整 code)
-    # 此时无法直接读完整值校验,但 keyboard.type 已经触发了所有事件,放行
-    if actual and len(actual) == 1 and code.startswith(actual):
-        logger.info("[otp] 检测到 6 格 UI(首格值=%r),已逐字敲入完整 code", actual)
+    if actual == code:
+        logger.info("[otp] ✓ 单框 UI 填写成功")
         return
 
-    # 真填错了 — 兜底 fill 一次
-    logger.warning("[otp] keyboard.type 后实际值=%r,期望=%r,fallback fill", actual, code)
+    if actual and len(actual) == 1 and code.startswith(actual):
+        logger.info("[otp] ✓ 6 格 UI 填写成功(首格值=%r)", actual)
+        return
+
+    # 兜底 fill
+    logger.warning("[otp] press_sequentially 后值不匹配 — fallback fill")
     try:
         ci.fill(code)
         _t.sleep(0.3)
-        actual = ci.input_value(timeout=1500)
+        actual = ci.input_value(timeout=2000)
+        logger.info("[otp] fill 后 input_value=%r", actual)
     except Exception as exc:
-        raise RuntimeError(f"OTP fill fallback 失败: {exc}") from exc
+        raise RuntimeError(f"OTP fill fallback 异常: {exc}") from exc
 
-    if actual != code:
+    if actual != code and not (actual and len(actual) == 1 and code.startswith(actual)):
         raise RuntimeError(
-            f"OTP 填写失败:keyboard.type + fill 后实际值={actual!r},期望={code!r}",
+            f"OTP 填写失败 — press_sequentially + fill 都搞不定:"
+            f"实际值={actual!r},期望={code!r}",
         )
+    logger.info("[otp] ✓ fill fallback 成功")
 
 
 def first_visible_editable(page, selectors: str, timeout: int = 800):
