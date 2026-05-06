@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { Play, Square, RefreshCw, Filter, Sparkles, Check, Cloud, Pause, Trash2, ChevronDown, AlertCircle, Clock, ChevronRight, Terminal } from 'lucide-react'
+import { Play, Square, RefreshCw, Filter, Sparkles, Check, Cloud, Pause, Trash2, ChevronDown, AlertCircle, Clock, ChevronRight, Terminal, Camera } from 'lucide-react'
 import { accountsApi, domainsApi, freegenApi, type Batch, type BatchDetail, type FreegenStatus } from '../api/endpoints'
 import { Button, Card, CardBody, CardHeader, LiveDot, Pill, ProgressBar, useToast } from '../components/ui'
+import { ScreenshotsModal } from '../components/ScreenshotsModal'
 
 interface SseEvent { ts: number; stage: string; [k: string]: any }
 
@@ -35,6 +36,7 @@ export function BatchPage() {
   const [expandedBatch, setExpandedBatch] = useState<string | null>(null)
   const [details, setDetails] = useState<Record<string, BatchDetail | 'loading'>>({})
   const [logExpanded, setLogExpanded] = useState(false)
+  const [showShots, setShowShots] = useState(false)
 
   async function pushBatch(b: Batch) {
     if (b.status !== 'finished' && b.status !== 'stopped') {
@@ -362,29 +364,41 @@ export function BatchPage() {
 
               {/* 折叠日志 */}
               <div className="mt-3 border-t border-line pt-3">
-                <button
-                  type="button"
-                  onClick={() => setLogExpanded((v) => !v)}
-                  className="flex items-center gap-2 text-[12.5px] text-ink-soft hover:text-ink transition w-full"
-                >
-                  <ChevronRight
-                    className={
-                      'w-3.5 h-3.5 transition-transform shrink-0 ' +
-                      (logExpanded ? 'rotate-90' : '')
-                    }
-                  />
-                  <Terminal className="w-3.5 h-3.5 shrink-0" />
-                  <span>实时日志 ({status.events?.length || 0} 条事件)</span>
-                  {!logExpanded && status.events && status.events.length > 0 && (
-                    <span className="ml-auto mono text-[11.5px] text-ink-faint truncate max-w-[280px]">
-                      {(() => {
-                        const last = status.events[status.events.length - 1] as any
-                        const detail = last?.error || last?.email || last?.msg || ''
-                        return `${last?.stage || ''} ${detail}`.trim()
-                      })()}
-                    </span>
-                  )}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setLogExpanded((v) => !v)}
+                    className="flex items-center gap-2 text-[12.5px] text-ink-soft hover:text-ink transition flex-1 min-w-0"
+                  >
+                    <ChevronRight
+                      className={
+                        'w-3.5 h-3.5 transition-transform shrink-0 ' +
+                        (logExpanded ? 'rotate-90' : '')
+                      }
+                    />
+                    <Terminal className="w-3.5 h-3.5 shrink-0" />
+                    <span className="shrink-0">实时日志 ({status.events?.length || 0} 条)</span>
+                    {!logExpanded && status.events && status.events.length > 0 && (
+                      <span className="ml-2 mono text-[11.5px] text-ink-faint truncate min-w-0">
+                        {(() => {
+                          const last = status.events[status.events.length - 1] as any
+                          const detail = last?.error || last?.email || last?.msg || ''
+                          return `${last?.stage || ''} ${detail}`.trim()
+                        })()}
+                      </span>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowShots(true)}
+                    className="btn btn-ghost shrink-0"
+                    style={{ padding: '4px 10px', fontSize: 12 }}
+                    title="查看浏览器截图(stage 命名,显示当前最新状态)"
+                  >
+                    <Camera className="w-3.5 h-3.5" />
+                    <span>截图</span>
+                  </button>
+                </div>
 
                 {logExpanded && (
                   <div className="mt-2 bg-bg-soft border border-line rounded-[12px] px-3 py-2.5 max-h-[320px] overflow-y-auto mono text-[12px] leading-relaxed">
@@ -554,6 +568,8 @@ export function BatchPage() {
           </table>
         </div>
       </Card>
+
+      <ScreenshotsModal open={showShots} onClose={() => setShowShots(false)} />
     </div>
   )
 }

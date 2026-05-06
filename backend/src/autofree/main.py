@@ -69,13 +69,14 @@ def create_app() -> FastAPI:
 
     # ---- API 路由 ----
     from autofree.auth.routes import router as auth_router
-    from autofree.api import accounts, domains, freegen, settings as settings_api, sse
+    from autofree.api import accounts, domains, freegen, screenshots, settings as settings_api, sse
 
     app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
     app.include_router(settings_api.router, prefix="/api/settings", tags=["settings"])
     app.include_router(domains.router, prefix="/api/domains", tags=["domains"])
     app.include_router(freegen.router, prefix="/api/freegen", tags=["freegen"])
     app.include_router(accounts.router, prefix="/api/accounts", tags=["accounts"])
+    app.include_router(screenshots.router, prefix="/api/screenshots", tags=["screenshots"])
     app.include_router(sse.router, prefix="/api/sse", tags=["sse"])
 
     # ---- 前端 SPA mount(优先 dist,缺则 fallback 到 dev 提示)----

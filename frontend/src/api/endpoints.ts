@@ -215,6 +215,13 @@ export const accountsApi = {
       affected_local_emails: string[]
       results: { name: string; ok: boolean; msg: string }[]
     }>('/accounts/cpa-inventory/delete', { names }).then(r => r.data),
+  screenshots: () =>
+    api.get<{
+      items: { name: string; size: number; mtime: number; mtime_iso: string }[]
+      total: number
+    }>('/screenshots').then(r => r.data),
+  screenshotUrl: (name: string) =>
+    `/api/screenshots/file?name=${encodeURIComponent(name)}`,
   cpaReauth: (params: { emails?: string[]; names?: string[] }) =>
     api.post<{
       task_id: string
