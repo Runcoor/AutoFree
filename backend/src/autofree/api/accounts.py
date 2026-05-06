@@ -401,14 +401,13 @@ def reauth_account(
 
     复用 freegen 的 resume runner — 浏览器登录 → 拿新 bundle → 写 auth.json → 推 CPA。
     成功后 Account 行的 token / cpa_synced 会被更新。
+    无密码账号(手动添加 / 仅邮箱登录)走 cloud-mail OTP 路径。
     """
     a = db.execute(select(Account).where(Account.email == email)).scalar_one_or_none()
     if not a:
         raise HTTPException(404, "账号不存在")
-    if not a.password:
-        raise HTTPException(400, "该账号缺密码,无法重新登录")
+    # 无密码账号走 email-only(cloud-mail OTP)路径,不再阻拦
 
-    # 复用 resume 端点的实现 — 直接调函数体
     from autofree.api.freegen import _current, _lock, _runner_resume
     import threading
     import uuid
@@ -418,7 +417,6 @@ def reauth_account(
             raise HTTPException(409, "已有任务在运行,请等待结束或先 stop")
 
         task_id = uuid.uuid4().hex[:12]
-        # 注意:不能直接赋 _current,得通过 freegen 模块的引用
         from autofree.api import freegen as _f
         _f._current = {
             "task_id": task_id,
@@ -439,13 +437,129 @@ def reauth_account(
         reset_stop()
 
         t = threading.Thread(
-            target=_runner_resume, args=(task_id, email, a.password),
+            target=_runner_resume,
+            args=(task_id, email, a.password or None),
+            kwargs={"mode": "reauth"},
             name=f"reauth-{task_id}", daemon=True,
         )
         _f._current["thread"] = t
         t.start()
 
     return {"task_id": task_id, "email": email, "batch_id": a.batch_id, "mode": "reauth"}
+
+
+class CpaReauthParams(BaseModel):
+    """按文件名或邮箱列表批量重新认证。优先 emails;若只给 names 则从 CPA inventory 反查 email。"""
+    emails: Optional[list[str]] = Field(default=None, max_length=200)
+    names: Optional[list[str]] = Field(default=None, max_length=200)
+
+
+@router.post("/cpa-inventory/reauth", status_code=202)
+def cpa_inventory_reauth(
+    params: CpaReauthParams,
+    db: Session = Depends(get_db),
+    _user=Depends(require_user),
+) -> dict:
+    """批量重新认证 — CPA 全景里失败 / token 失效号一键重跑。
+
+    输入:emails(优先)或 names。每号要求本地有 Account 行(否则跳过;cpa_only 号无法 reauth)。
+    串行执行,每号成功后:写新 auth.json → CPA push → DB 更新 token / cpa_synced。
+    """
+    # 1) 收集 email 列表
+    target_emails: list[str] = []
+    skipped: list[dict] = []
+
+    if params.emails:
+        target_emails = [(e or "").strip().lower() for e in params.emails if (e or "").strip()]
+    elif params.names:
+        # 用 CPA inventory 反查 email
+        from autofree.core.cpa_sync import list_cpa_inventory
+        ok, payload = list_cpa_inventory()
+        by_name: dict[str, str] = {}
+        if ok:
+            for f in payload:  # type: ignore[union-attr]
+                n = (f.get("name") or f.get("id") or "").strip()
+                em = (f.get("email") or "").strip().lower()
+                if n and em:
+                    by_name[n] = em
+        for n in params.names:
+            n = (n or "").strip()
+            em = by_name.get(n, "")
+            if em:
+                target_emails.append(em)
+            else:
+                skipped.append({"name": n, "reason": "无法从 CPA inventory 反查 email"})
+    else:
+        raise HTTPException(400, "必须传 emails 或 names")
+
+    if not target_emails:
+        raise HTTPException(400, "没有可重新认证的账号")
+
+    # 去重保序
+    seen: set[str] = set()
+    target_emails = [e for e in target_emails if not (e in seen or seen.add(e))]
+
+    # 2) 解析每个 email → 本地 Account
+    items: list[tuple[str, str | None, str]] = []
+    for em in target_emails:
+        a = db.execute(select(Account).where(Account.email == em)).scalar_one_or_none()
+        if not a:
+            skipped.append({"email": em, "reason": "本地无 Account 记录(仅 CPA 号无法 reauth)"})
+            continue
+        items.append((em, a.password or None, a.batch_id or ""))
+
+    if not items:
+        return {
+            "task_id": "",
+            "total": 0,
+            "skipped": skipped,
+            "msg": "无可执行账号 — 全部跳过",
+        }
+
+    # 3) 启动 _runner_resume_all(mode='reauth')
+    from autofree.api.freegen import _current, _lock, _runner_resume_all
+    from autofree.api import freegen as _f
+    from autofree.core.control import reset_stop
+    import threading
+    import uuid
+
+    with _lock:
+        if _current and _current.get("stage") not in ("finished", "stopped", "failed"):
+            raise HTTPException(409, "已有任务在运行,请等待结束或先 stop")
+
+        task_id = uuid.uuid4().hex[:12]
+        _f._current = {
+            "task_id": task_id,
+            "batch_id": "",
+            "stage": "pending",
+            "index": 0,
+            "total": len(items),
+            "ok": 0,
+            "failed": 0,
+            "current_email": items[0][0] if items else "",
+            "events": [],
+            "stop_requested": False,
+            "thread": None,
+            "started_at": None,
+            "mode": "reauth_all",
+        }
+        reset_stop()
+        t = threading.Thread(
+            target=_runner_resume_all,
+            args=(task_id, items),
+            kwargs={"mode": "reauth"},
+            name=f"reauth-all-{task_id}", daemon=True,
+        )
+        _f._current["thread"] = t
+        t.start()
+
+    return {
+        "task_id": task_id,
+        "total": len(items),
+        "emails": [e for e, _, _ in items],
+        "skipped": skipped,
+        "mode": "reauth_all",
+    }
 
 
 @router.get("/{email}/auth.json")

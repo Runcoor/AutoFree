@@ -11,9 +11,17 @@ export const authApi = {
 
 // ─── settings ───────────────────────────────────────────────
 export interface CloudMailCfg { base_url: string; password_masked: string; has_password: boolean; msg?: string }
+export interface SmsProviderBlock {
+  api_key_masked: string; has_api_key: boolean
+  service: string; country: string; operator: string
+}
 export interface SmsCfg {
+  active: string  // '5sim' | 'hero-sms'
+  providers: Record<string, SmsProviderBlock>
+  // 兼容字段(active provider 的扁平视图)
   provider: string; api_key_masked: string; has_api_key: boolean
-  service: string; country: string; operator: string; msg?: string
+  service: string; country: string; operator: string
+  msg?: string
 }
 export interface CpaCfg { url: string; key_masked: string; has_key: boolean; enabled: boolean; msg?: string }
 
@@ -22,9 +30,17 @@ export const settingsApi = {
   putCloudMail: (body: Partial<{ base_url: string; password: string }>) =>
     api.put<CloudMailCfg>('/settings/cloud-mail', body).then(r => r.data),
   getSms: () => api.get<SmsCfg>('/settings/sms').then(r => r.data),
-  putSms: (body: Partial<{ provider: string; api_key: string; service: string; country: string; operator: string }>) =>
-    api.put<SmsCfg>('/settings/sms', body).then(r => r.data),
-  smsBalance: () => api.post<{ provider: string; balance: number; currency: string; raw?: any }>('/settings/sms/balance').then(r => r.data),
+  putSms: (body: {
+    provider: string  // '5sim' | 'hero-sms' — 必传,决定写入哪个 namespace
+    api_key?: string; service?: string; country?: string; operator?: string
+    set_active?: boolean
+  }) => api.put<SmsCfg>('/settings/sms', body).then(r => r.data),
+  setSmsActive: (provider: string) =>
+    api.post<SmsCfg>('/settings/sms/active', { provider }).then(r => r.data),
+  smsBalance: (provider?: string) =>
+    api.post<{ provider: string; balance: number; currency: string; raw?: any }>(
+      '/settings/sms/balance', null, { params: provider ? { provider } : undefined },
+    ).then(r => r.data),
   getCpa: () => api.get<CpaCfg>('/settings/cpa').then(r => r.data),
   putCpa: (body: Partial<{ url: string; key: string; enabled: boolean }>) =>
     api.put<CpaCfg>('/settings/cpa', body).then(r => r.data),
@@ -199,6 +215,15 @@ export const accountsApi = {
       affected_local_emails: string[]
       results: { name: string; ok: boolean; msg: string }[]
     }>('/accounts/cpa-inventory/delete', { names }).then(r => r.data),
+  cpaReauth: (params: { emails?: string[]; names?: string[] }) =>
+    api.post<{
+      task_id: string
+      total: number
+      emails?: string[]
+      skipped: { email?: string; name?: string; reason: string }[]
+      mode: string
+      msg?: string
+    }>('/accounts/cpa-inventory/reauth', params).then(r => r.data),
   syncAllUnsynced: (forceRefresh = false, includeFailed = true) =>
     api.post<{
       total: number; pushed: number; failed: number; skipped: number

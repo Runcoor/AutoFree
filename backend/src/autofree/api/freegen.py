@@ -277,8 +277,12 @@ def _snapshot_running() -> dict:
 
 # ─── 核心 runner — 后台 thread ───────────────────────────────────────────
 
-def _runner_resume(task_id: str, email: str, password: str | None) -> None:
-    """单号 resume runner — 重跑 OAuth/phone gate,成功落 Account + mark pending resolved。"""
+def _runner_resume(task_id: str, email: str, password: str | None, mode: str = "resume") -> None:
+    """单号 resume / reauth runner — 重跑 OAuth(已验证号通常无需 phone gate)。
+
+    mode='resume':失败号续验,成功 INSERT Account + 标 pending resolved
+    mode='reauth':已存在 Account 用新 bundle 覆盖老 token / cpa 状态
+    """
     from autofree.core.batch import run_single_resume
 
     state = _current
@@ -286,7 +290,7 @@ def _runner_resume(task_id: str, email: str, password: str | None) -> None:
 
     state["stage"] = "starting"
     state["started_at"] = time.time()
-    state["mode"] = "resume"
+    state["mode"] = mode
 
     domain = email.split("@", 1)[-1] if "@" in email else ""
 
@@ -310,8 +314,8 @@ def _runner_resume(task_id: str, email: str, password: str | None) -> None:
                 state["ok"] = 1
             else:
                 state["failed"] = 1
-            # 标记 mode=resume,_persist_account 据此走 resume 分支
-            info_with_mode = {**info, "mode": "resume"}
+            # 把外层 mode 注进 info,_persist_account 据此走对应分支
+            info_with_mode = {**info, "mode": mode}
             _persist_account(info_with_mode, domain=domain)
 
     error_msg: str | None = None
@@ -333,10 +337,15 @@ def _runner_resume(task_id: str, email: str, password: str | None) -> None:
         state["events"].append({"ts": time.time(), "stage": "task_ended", "status": finished})
 
 
-def _runner_resume_all(task_id: str, items: list[tuple[str, str | None, str]]) -> None:
-    """串行 resume 多个 pending 账号 — items: list of (email, password, batch_id)。
+def _runner_resume_all(
+    task_id: str,
+    items: list[tuple[str, str | None, str]],
+    mode: str = "resume",
+) -> None:
+    """串行 resume / reauth 多个账号 — items: list of (email, password, batch_id)。
 
     任一号失败不中断后续。Stop 请求会在当前号结束后生效。
+    mode 决定 _persist_account 走 resume(写 pending)还是 reauth(更新 Account)分支。
     """
     from autofree.core.batch import run_single_resume
     from autofree.core.control import request_stop, reset_stop
@@ -346,7 +355,7 @@ def _runner_resume_all(task_id: str, items: list[tuple[str, str | None, str]]) -
 
     state["stage"] = "starting"
     state["started_at"] = time.time()
-    state["mode"] = "resume_all"
+    state["mode"] = "reauth_all" if mode == "reauth" else "resume_all"
 
     error_msg: str | None = None
     try:
@@ -382,7 +391,7 @@ def _runner_resume_all(task_id: str, items: list[tuple[str, str | None, str]]) -
                         state["ok"] = state.get("ok", 0) + 1
                     else:
                         state["failed"] = state.get("failed", 0) + 1
-                    info_with_mode = {**info, "mode": "resume"}
+                    info_with_mode = {**info, "mode": mode}
                     _persist_account(info_with_mode, domain=_domain)
 
             try:

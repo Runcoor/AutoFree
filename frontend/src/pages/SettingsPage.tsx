@@ -6,7 +6,7 @@ import {
   authApi, domainsApi, settingsApi,
   type CloudMailCfg, type CpaCfg, type Domain, type SmsCfg,
 } from '../api/endpoints'
-import { Button, Card, CardBody, CardHeader, Input, Pill, Select, Switch, useToast } from '../components/ui'
+import { Button, Card, CardBody, CardHeader, Input, Pill, Switch, useToast } from '../components/ui'
 
 export function SettingsPage() {
   return (
@@ -134,32 +134,141 @@ function CloudMailCard() {
 }
 
 // ─────────────────── SMS ───────────────────
+const SMS_PROVIDER_META: Record<string, {
+  label: string
+  countryHint: string
+  operatorHint: string
+  countryDefault: string
+  operatorDefault: string
+  docsUrl?: string
+}> = {
+  '5sim': {
+    label: '5sim',
+    countryHint: 'slug,如 france / indonesia / malaysia / thailand',
+    operatorHint: 'any / virtual51 / orange / xl 等(具体见 5sim Statistics)',
+    countryDefault: 'france',
+    operatorDefault: 'any',
+    docsUrl: 'https://5sim.net/products/openai',
+  },
+  'hero-sms': {
+    label: 'hero-sms',
+    countryHint: '英文名,如 england / france / usa(内部翻译为数字 ID)',
+    operatorHint: 'any / 留空(hero-sms 默认任意运营商)',
+    countryDefault: 'england',
+    operatorDefault: 'any',
+    docsUrl: 'https://hero-sms.com/cn/api',
+  },
+}
+const SMS_PROVIDERS = Object.keys(SMS_PROVIDER_META)
+
 function SmsCard() {
   const [cfg, setCfg] = useState<SmsCfg | null>(null)
-  const [provider, setProvider] = useState('5sim')
-  const [apiKey, setApiKey] = useState('')
-  const [service, setService] = useState('openai')
-  const [country, setCountry] = useState('france')
-  const [operator, setOperator] = useState('any')
-  const [busy, setBusy] = useState(false)
-  const [balance, setBalance] = useState('—')
-  const [balanceBusy, setBalanceBusy] = useState(false)
+  const [busyActive, setBusyActive] = useState(false)
   const push = useToast((s) => s.push)
 
   useEffect(() => { load() }, [])
   async function load() {
     const c = await settingsApi.getSms()
     setCfg(c)
-    setProvider(c.provider); setService(c.service); setCountry(c.country); setOperator(c.operator)
   }
 
-  async function save() {
+  async function setActive(provider: string) {
+    if (cfg?.active === provider) return
+    setBusyActive(true)
+    try {
+      const r = await settingsApi.setSmsActive(provider)
+      setCfg(r)
+      push(`已切换激活 provider → ${provider}`, 'success')
+    } catch (err: any) {
+      push(err?.response?.data?.detail || '切换失败', 'danger')
+    } finally {
+      setBusyActive(false)
+    }
+  }
+
+  return (
+    <SettingsCard
+      icon={<MessageSquare size={18} />}
+      title="SMS 接码"
+      subtitle="多 provider 配置独立 · 每个 provider 的 country / operator 取值不同;可单独切换激活的"
+      delay={80}
+    >
+      {cfg && (
+        <div className="mb-4 flex items-center gap-2 flex-wrap">
+          <span className="text-[12px] text-ink-soft mr-1">当前激活:</span>
+          {SMS_PROVIDERS.map((p) => (
+            <button
+              key={p}
+              type="button"
+              onClick={() => setActive(p)}
+              disabled={busyActive}
+              className={
+                'btn ' +
+                (cfg.active === p ? 'btn-primary' : 'btn-ghost') +
+                ' !h-[28px] !px-3 !text-[12px]'
+              }
+              title={cfg.active === p ? '当前激活' : `切换到 ${p}`}
+            >
+              {cfg.active === p && <Check className="w-3 h-3" />}
+              {SMS_PROVIDER_META[p].label}
+            </button>
+          ))}
+          <span className="text-[11px] text-ink-faint ml-2">
+            注册流程会用「激活 provider」的配置打 phone gate
+          </span>
+        </div>
+      )}
+
+      {SMS_PROVIDERS.map((p) => (
+        <SmsProviderForm
+          key={p}
+          provider={p}
+          isActive={cfg?.active === p}
+          block={cfg?.providers?.[p]}
+          onSaved={(updated) => setCfg(updated)}
+        />
+      ))}
+    </SettingsCard>
+  )
+}
+
+function SmsProviderForm({
+  provider, isActive, block, onSaved,
+}: {
+  provider: string
+  isActive: boolean
+  block: { api_key_masked: string; has_api_key: boolean; service: string; country: string; operator: string } | undefined
+  onSaved: (cfg: SmsCfg) => void
+}) {
+  const meta = SMS_PROVIDER_META[provider]
+  const [apiKey, setApiKey] = useState('')
+  const [service, setService] = useState('openai')
+  const [country, setCountry] = useState(meta.countryDefault)
+  const [operator, setOperator] = useState(meta.operatorDefault)
+  const [busy, setBusy] = useState(false)
+  const [balance, setBalance] = useState('—')
+  const [balanceBusy, setBalanceBusy] = useState(false)
+  const push = useToast((s) => s.push)
+
+  // block 变化时同步表单字段(切换 active 后 GET /settings/sms 刷新)
+  useEffect(() => {
+    if (block) {
+      setService(block.service || 'openai')
+      setCountry(block.country || meta.countryDefault)
+      setOperator(block.operator || meta.operatorDefault)
+    }
+  }, [block, meta])
+
+  async function save(setActiveAfter = false) {
     setBusy(true)
     try {
       const body: any = { provider, service, country, operator }
       if (apiKey) body.api_key = apiKey
-      const r = await settingsApi.putSms(body); setCfg(r); setApiKey('')
-      push('已保存', 'success')
+      if (setActiveAfter) body.set_active = true
+      const r = await settingsApi.putSms(body)
+      onSaved(r)
+      setApiKey('')
+      push(setActiveAfter ? `已保存并激活 ${provider}` : `已保存 ${provider} 配置`, 'success')
     } catch (err: any) {
       push(err?.response?.data?.detail || '保存失败', 'danger')
     } finally {
@@ -171,7 +280,7 @@ function SmsCard() {
     setBalanceBusy(true)
     setBalance('查询中…')
     try {
-      const r = await settingsApi.smsBalance()
+      const r = await settingsApi.smsBalance(provider)
       setBalance(`${r.balance} ${r.currency}`)
     } catch (err: any) {
       setBalance('—')
@@ -182,21 +291,40 @@ function SmsCard() {
   }
 
   return (
-    <SettingsCard
-      icon={<MessageSquare size={18} />}
-      title="SMS 接码"
-      subtitle="用于自动通过 OpenAI 注册的 phone gate"
-      delay={80}
+    <div
+      className="rounded-[10px] border mb-4 p-4"
+      style={{
+        borderColor: isActive ? 'var(--brand-1)' : 'var(--line)',
+        background: isActive ? 'rgba(0,114,255,0.04)' : 'transparent',
+      }}
     >
+      <div className="flex items-center justify-between mb-3.5 flex-wrap gap-2">
+        <div className="flex items-center gap-2">
+          <span className="font-semibold text-[14px]">{meta.label}</span>
+          {isActive
+            ? <Pill tone="info"><Check className="w-3 h-3" />激活中</Pill>
+            : <Pill tone="muted">未激活</Pill>}
+          {block?.has_api_key
+            ? <Pill tone="success">已配置</Pill>
+            : <Pill tone="warn">未配置 api_key</Pill>}
+        </div>
+        {meta.docsUrl && (
+          <a
+            href={meta.docsUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="text-[11px] text-ink-faint hover:text-brand-1"
+          >
+            API 文档 ↗
+          </a>
+        )}
+      </div>
+
       <div className="grid gap-4 md:grid-cols-2 mb-3.5">
-        <Select label="Provider" value={provider} onChange={(e) => setProvider(e.target.value)}>
-          <option value="5sim">5sim</option>
-          <option value="hero-sms">hero-sms</option>
-        </Select>
         <Input
           label="API Key"
           type="password"
-          placeholder={cfg?.has_api_key ? '已设置 · 留空不改' : '未设置'}
+          placeholder={block?.has_api_key ? `已设置(${block.api_key_masked}) · 留空不改` : '未设置'}
           value={apiKey}
           onChange={(e) => setApiKey(e.target.value)}
         />
@@ -210,34 +338,39 @@ function SmsCard() {
           label="Country"
           value={country}
           onChange={(e) => setCountry(e.target.value)}
-          hint="如 france / uk / usa"
+          hint={meta.countryHint}
         />
         <Input
           label="Operator"
           value={operator}
           onChange={(e) => setOperator(e.target.value)}
-          hint="any / virtual51 等"
+          hint={meta.operatorHint}
         />
-        <div className="field">
+        <div className="field md:col-span-2">
           <label>当前余额</label>
           <div className="flex items-center gap-2">
-            <input
-              className="input mono bg-bg-soft"
-              value={balance}
-              readOnly
-            />
-            <Button onClick={checkBalance} loading={balanceBusy}>
+            <input className="input mono bg-bg-soft" value={balance} readOnly />
+            <Button onClick={checkBalance} loading={balanceBusy} disabled={!block?.has_api_key && !apiKey}>
               <RefreshCw className="w-3.5 h-3.5" />
               查询
             </Button>
           </div>
         </div>
       </div>
-      <Button variant="primary" onClick={save} loading={busy}>
-        <Check className="w-3.5 h-3.5" />
-        保存
-      </Button>
-    </SettingsCard>
+
+      <div className="flex items-center gap-2 flex-wrap">
+        <Button variant="primary" onClick={() => save(false)} loading={busy}>
+          <Check className="w-3.5 h-3.5" />
+          保存配置
+        </Button>
+        {!isActive && (
+          <Button onClick={() => save(true)} loading={busy}>
+            <Check className="w-3.5 h-3.5" />
+            保存并设为激活
+          </Button>
+        )}
+      </div>
+    </div>
   )
 }
 

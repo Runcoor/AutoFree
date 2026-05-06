@@ -68,14 +68,60 @@ def get_mail_config() -> dict:
     }
 
 
+SMS_PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
+    "5sim": {"service": "openai", "country": "france", "operator": "any"},
+    "hero-sms": {"service": "openai", "country": "england", "operator": "any"},
+}
+SMS_PROVIDERS_KNOWN = tuple(SMS_PROVIDER_DEFAULTS.keys())
+
+
+def _sms_defaults(provider: str) -> dict[str, str]:
+    return SMS_PROVIDER_DEFAULTS.get(provider, SMS_PROVIDER_DEFAULTS["5sim"])
+
+
 def get_sms_config() -> dict:
+    """返回 active provider 的完整配置(oauth / phone gate 调用方用)。
+
+    配置存储:
+      - sms.provider          — 当前激活的 provider(5sim / hero-sms)
+      - sms.<provider>.api_key / .service / .country / .operator — 每个 provider 独立 namespace
+      - sms.api_key / .service / ...(legacy 扁平字段) — 向后兼容,空则才回退到此
+    """
     g = _read_setting_group("sms")
+    provider = (g.get("provider") or "5sim").strip().lower() or "5sim"
+    defaults = _sms_defaults(provider)
+
+    def _ns(key: str, default: str) -> str:
+        # 优先 namespace 字段;空则回退 legacy 扁平(为旧用户向后兼容)
+        return (g.get(f"{provider}.{key}") or g.get(key) or default).strip() or default
+
     return {
-        "provider": g.get("provider") or "5sim",
-        "api_key": g.get("api_key") or "",
-        "service": g.get("service") or "openai",
-        "country": g.get("country") or "france",
-        "operator": g.get("operator") or "any",
+        "provider": provider,
+        "api_key": (g.get(f"{provider}.api_key") or g.get("api_key") or "").strip(),
+        "service": _ns("service", defaults["service"]),
+        "country": _ns("country", defaults["country"]),
+        "operator": _ns("operator", defaults["operator"]),
+    }
+
+
+def get_sms_provider_config(provider: str) -> dict:
+    """返回指定 provider 的配置(供 settings 页同时编辑多个 provider 的 form 用)。"""
+    g = _read_setting_group("sms")
+    p = (provider or "").strip().lower()
+    defaults = _sms_defaults(p)
+    active = (g.get("provider") or "5sim").strip().lower()
+
+    def _ns(key: str, default: str) -> str:
+        # legacy fallback 只对 active provider 生效,避免 5sim 旧 api_key 被 hero-sms tab 读到
+        legacy = g.get(key, "") if p == active else ""
+        return (g.get(f"{p}.{key}") or legacy or default).strip() or default
+
+    return {
+        "provider": p,
+        "api_key": (g.get(f"{p}.api_key") or (g.get("api_key", "") if p == active else "") or "").strip(),
+        "service": _ns("service", defaults["service"]),
+        "country": _ns("country", defaults["country"]),
+        "operator": _ns("operator", defaults["operator"]),
     }
 
 

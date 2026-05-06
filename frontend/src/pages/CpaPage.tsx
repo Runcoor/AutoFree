@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Cloud, RefreshCw, Trash2, Search, Check, AlertCircle, X, Filter as FilterIcon,
-  Database, ShieldOff, Power,
+  Database, ShieldOff, Power, KeyRound,
 } from 'lucide-react'
 import { accountsApi, type CpaInventoryItem } from '../api/endpoints'
 import { Button, Card, CardHeader, Pill, useToast } from '../components/ui'
@@ -19,8 +20,10 @@ export function CpaPage() {
   const [tab, setTab] = useState<Tab>('all')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [deleting, setDeleting] = useState<string | null>(null)
+  const [reauthing, setReauthing] = useState<string | null>(null)
   const [bulkBusy, setBulkBusy] = useState(false)
   const push = useToast((s) => s.push)
+  const navigate = useNavigate()
 
   useEffect(() => { refresh() }, [])
 
@@ -135,7 +138,79 @@ export function CpaPage() {
     }
   }
 
+  async function reauthOne(item: CpaInventoryItem) {
+    if (!item.in_local) {
+      push('仅 CPA 号无法重新认证(本地无密码 / 邮箱)', 'danger')
+      return
+    }
+    const label = item.email || item.name
+    if (!confirm(`重新认证 ${label}?\n\n会启动浏览器走 OAuth 重登(已验证手机号,无需再过 phone gate),拿到新 token 后写盘并推送到 CPA。`)) return
+    setReauthing(item.name)
+    try {
+      const r = await accountsApi.cpaReauth({ emails: [item.email] })
+      if (r.total === 0) {
+        push(r.msg || '没有可执行账号', 'danger')
+        return
+      }
+      push(`已启动重新认证(task=${r.task_id})— 跳转到批次实时进度`, 'success')
+      navigate('/batch')
+    } catch (err: any) {
+      push(err?.response?.data?.detail || '启动失败', 'danger')
+    } finally {
+      setReauthing(null)
+    }
+  }
+
+  async function reauthSelected() {
+    const selectedItems = items.filter((x) => selected.has(x.name))
+    const reAuthable = selectedItems.filter((x) => x.in_local)
+    const skipped = selectedItems.length - reAuthable.length
+    if (reAuthable.length === 0) {
+      push('选中项里没有本地账号,无法 reauth', 'danger')
+      return
+    }
+    if (!confirm(
+      `批量重新认证 ${reAuthable.length} 个本地号?` +
+      (skipped > 0 ? `\n\n跳过 ${skipped} 个仅 CPA 号(本地无密码)。` : '') +
+      `\n\n串行执行,浏览器逐号 OAuth → 写盘 → CPA push。可在批次页查看实时进度。`,
+    )) return
+    setBulkBusy(true)
+    try {
+      const r = await accountsApi.cpaReauth({ emails: reAuthable.map((x) => x.email) })
+      push(`已启动批量重新认证(${r.total} 个)— task=${r.task_id}`, 'success')
+      navigate('/batch')
+    } catch (err: any) {
+      push(err?.response?.data?.detail || '启动失败', 'danger')
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
+  async function reauthAllFailedLocal() {
+    const targets = items.filter((x) => x.is_failed_state && x.in_local)
+    if (targets.length === 0) {
+      push('当前没有「失败状态 + 本地号」的项', 'neutral')
+      return
+    }
+    if (!confirm(
+      `一键重新认证所有失败的本地号(${targets.length} 个)?\n\n` +
+      `会逐号重跑 OAuth 拿新 token、推到 CPA。已验证过手机号的号通常不会再过 phone gate。`,
+    )) return
+    setBulkBusy(true)
+    try {
+      const r = await accountsApi.cpaReauth({ emails: targets.map((x) => x.email) })
+      push(`已启动(${r.total} 个)— task=${r.task_id}`, 'success')
+      navigate('/batch')
+    } catch (err: any) {
+      push(err?.response?.data?.detail || '启动失败', 'danger')
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
   const failedCount = items.filter((x) => x.is_failed_state).length
+  const failedLocalCount = items.filter((x) => x.is_failed_state && x.in_local).length
+  const selectedReauthableCount = items.filter((x) => selected.has(x.name) && x.in_local).length
 
   return (
     <div className="page">
@@ -147,6 +222,12 @@ export function CpaPage() {
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          {failedLocalCount > 0 && (
+            <Button variant="primary" onClick={reauthAllFailedLocal} loading={bulkBusy}>
+              <KeyRound className="w-3.5 h-3.5" />
+              重新认证失败号 ({failedLocalCount})
+            </Button>
+          )}
           {failedCount > 0 && (
             <Button variant="danger" onClick={deleteAllFailed} loading={bulkBusy}>
               <ShieldOff className="w-3.5 h-3.5" />
@@ -221,6 +302,12 @@ export function CpaPage() {
                   </button>
                 )}
               </div>
+              {selected.size > 0 && selectedReauthableCount > 0 && (
+                <Button variant="primary" onClick={reauthSelected} loading={bulkBusy}>
+                  <KeyRound className="w-3.5 h-3.5" />
+                  重新认证 ({selectedReauthableCount})
+                </Button>
+              )}
               {selected.size > 0 && (
                 <Button variant="danger" onClick={deleteSelected} loading={bulkBusy}>
                   <Trash2 className="w-3.5 h-3.5" />
@@ -332,19 +419,36 @@ export function CpaPage() {
                     {it.updated_at ? relTime(it.updated_at) : '—'}
                   </td>
                   <td>
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      style={{ padding: '6px 10px', fontSize: 12 }}
-                      onClick={() => deleteOne(it)}
-                      disabled={deleting === it.name || bulkBusy}
-                      title="从 CPA 删除该 auth-file(本地 DB 保留)"
-                    >
-                      {deleting === it.name
-                        ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                        : <Trash2 className="w-3.5 h-3.5 text-danger" />}
-                      <span>删除</span>
-                    </button>
+                    <div className="flex items-center gap-1.5">
+                      {it.in_local && (
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          style={{ padding: '6px 10px', fontSize: 12 }}
+                          onClick={() => reauthOne(it)}
+                          disabled={reauthing === it.name || deleting === it.name || bulkBusy}
+                          title="重新走一次 OAuth 拿新 token,失败号也能用(已验证过手机号无需 phone gate)"
+                        >
+                          {reauthing === it.name
+                            ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            : <KeyRound className="w-3.5 h-3.5 text-info" />}
+                          <span>重认证</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        style={{ padding: '6px 10px', fontSize: 12 }}
+                        onClick={() => deleteOne(it)}
+                        disabled={deleting === it.name || reauthing === it.name || bulkBusy}
+                        title="从 CPA 删除该 auth-file(本地 DB 保留)"
+                      >
+                        {deleting === it.name
+                          ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          : <Trash2 className="w-3.5 h-3.5 text-danger" />}
+                        <span>删除</span>
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -356,7 +460,8 @@ export function CpaPage() {
       <div className="text-[12px] text-ink-faint flex items-start gap-2">
         <FilterIcon className="w-3 h-3 shrink-0 mt-0.5" />
         <span>
-          点击上方统计卡可切换筛选;复选框选中后可批量删除。删除仅作用于 CPA 远端,本地 AutoFree DB 不会丢号。
+          点击统计卡切换筛选;选中后可批量「重新认证」(走 OAuth 拿新 token,推回 CPA)或「删除」。
+          只有「本地 + CPA」的号能 reauth(需要邮箱 / 密码);仅 CPA 号只能删。删除仅作用于 CPA 远端。
         </span>
       </div>
     </div>
