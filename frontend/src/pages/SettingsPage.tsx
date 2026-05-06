@@ -269,11 +269,11 @@ function ProxyCard() {
           hint="住宅默认 12321,移动默认 8080"
         />
         <Input
-          label="用户名"
+          label="用户名(只填基础那段!)"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
-          placeholder="iproyal 仪表盘的 username"
-          hint="基础用户名,session/lifetime 由后端自动追加"
+          placeholder="如 AQgmLM2Rj... — 不要带 _country-X / _session-X / _lifetime-X"
+          hint="只填冒号前的基础随机字符串 · country/session/lifetime 由代码自动追加,带了会重复 → 407"
         />
         <Input
           label="密码"

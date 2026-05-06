@@ -288,10 +288,14 @@ def post_proxy_test(_user=Depends(require_user)) -> dict:
     server = opts["server"]
     user = opts["username"]
     pwd = opts["password"]
-    # URL 编码用户名/密码,避免特殊字符(@ / : % 等)破坏 URL 解析
     user_enc = urllib.parse.quote(user, safe="")
     pwd_enc = urllib.parse.quote(pwd, safe="")
     proxy_url = server.replace("http://", f"http://{user_enc}:{pwd_enc}@", 1)
+
+    logger.info(
+        "[proxy/test] 测试代理 server=%s user_full=%s pwd_len=%d",
+        server, user, len(pwd),
+    )
 
     try:
         with httpx.Client(
@@ -306,9 +310,13 @@ def post_proxy_test(_user=Depends(require_user)) -> dict:
         if "407" in msg:
             raise HTTPException(
                 502,
-                f"代理认证失败(407)— 请到 IPRoyal 后台 Endpoint Generator 复制正确的 "
-                f"username/password,并确认认证方式是 Username/Password 而不是 IP Whitelist Only。"
-                f" 当前 username 前缀 = {user.split('_')[0][:8]}***",
+                "代理认证失败(407)— 三个可能原因:\n"
+                "  1. username/password 错(请到 IPRoyal Endpoint Generator 重新复制)\n"
+                "  2. 你填的 username 里已经包含了 _country-X_session-X_lifetime-X 后缀,"
+                "代码会自动追加导致重复 — 只填**最基础那段**(冒号前的随机字符串),不要带任何 _country-/_session-/_lifetime-\n"
+                "  3. IPRoyal 后台认证方式是 IP Whitelist Only,需改成 Username/Password\n"
+                f"\n当前 launch 用户名 = {user}\n"
+                f"基础用户名 = {user.split('_country-')[0].split('_session-')[0].split('_lifetime-')[0]}",
             ) from exc
         raise HTTPException(502, f"代理测试失败: {exc!r}") from exc
     except Exception as exc:

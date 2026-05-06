@@ -28,10 +28,36 @@ def make_proxy_session_id(prefix: str = "") -> str:
     return rand
 
 
+_IPROYAL_PARAM_PREFIXES = (
+    "country-", "state-", "city-", "session-", "lifetime-",
+    "streaming-", "skipispstatic-", "isp-",
+)
+
+
+def _strip_iproyal_params(username: str) -> str:
+    """剥离用户名末尾已有的 IPRoyal 参数(country-/session-/lifetime- 等),
+    避免和我们自动追加的参数重复导致 407。
+
+    用户从 IPRoyal Endpoint Generator 复制 username 时常常已经带了完整参数后缀。
+    """
+    if not username:
+        return ""
+    parts = username.split("_")
+    # 从末尾向前扫,凡是匹配已知前缀的就剔除,直到遇到第一个不匹配 → 那是真正的 base 用户名
+    while len(parts) > 1:
+        last = parts[-1].lower()
+        if any(last.startswith(pfx) for pfx in _IPROYAL_PARAM_PREFIXES):
+            parts.pop()
+        else:
+            break
+    return "_".join(parts)
+
+
 def get_proxy_options(session_id: str | None = None) -> dict | None:
     """返回 Playwright launch 用的 proxy 字典,未启用 / 配置不全 → None。
 
     session_id 注入到 username 末尾(`_session-XXX_lifetime-YY`),每个 launch 一个。
+    自动剥离用户填的 username 里已有的 country-/session-/lifetime- 后缀,避免重复。
     """
     try:
         from autofree.core.config import get_proxy_config
@@ -43,12 +69,19 @@ def get_proxy_options(session_id: str | None = None) -> dict | None:
     if not cfg["enabled"]:
         return None
     host, port = cfg["host"], cfg["port"]
-    user, pwd = cfg["username"], cfg["password"]
-    if not (host and port and user and pwd):
+    user_raw, pwd = cfg["username"], cfg["password"]
+    if not (host and port and user_raw and pwd):
         logger.warning("[browser] proxy 启用但配置不全(host/port/user/pwd 必填)")
         return None
 
-    parts = [user]
+    base_user = _strip_iproyal_params(user_raw)
+    if base_user != user_raw:
+        logger.info(
+            "[browser] proxy username 自动剥离参数后缀: %r → %r",
+            user_raw, base_user,
+        )
+
+    parts = [base_user]
     if cfg["country"]:
         parts.append(f"country-{cfg['country']}")
     if session_id:
