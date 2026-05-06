@@ -1006,35 +1006,62 @@ def _solve_phone_gate(page) -> bool:
     )
 
 
-# consent 页 Continue 按钮 — 沿用过去半年验证过的 selector 方案。
-# 用 Playwright 单 locator 多文本(逗号 = OR), .first 拿第一个匹配, has-text 自动忽略
-# 大小写 + 空白. 实测在 team 路径上稳定工作, 不要再过度设计.
-#
-# 之前自己写了 12 个 :not(:has-text("with")) 嵌套, Playwright 对 :not(:has-text())
-# 支持有限, 经常匹配到非 submit 的隐藏 button — 看似点击成功但 form 没提交.
+# consent 页 Continue 按钮 — 排除 name="intent" 的(那是 /log-in 页的 email 提交按钮,
+# 跟 consent 完全不是一回事,误点会触发 disabled / detached 错误)
 _CONSENT_BUTTON_LOCATOR = (
-    'button:has-text("继续"), button:has-text("Continue"), '
+    'button:not([name="intent"]):has-text("继续"), '
+    'button:not([name="intent"]):has-text("Continue"), '
     'button:has-text("Allow"), button:has-text("Authorize"), '
     'button:has-text("授权")'
+)
+
+# 这些 URL 子串说明还在登录/邮箱步骤,不是 consent — 此时不该点 consent 按钮
+_NON_CONSENT_URL_MARKERS = (
+    "/log-in-or-create-account",
+    "/log-in",
+    "/login-or-create",
+    "/u/login",
+    "/u/signup",
 )
 
 
 def _click_consent_button(page, *, after_workspace_pick: bool = False) -> bool:
     """点 consent 页面的 Continue/Authorize 按钮,返回是否点中了。
 
-    简单做法:单 locator + 多文本 OR + .first.click() + sleep(5).
-    Playwright .click() 自带 actionability 等待, sleep 5s 给浏览器跑完
-    consent → /authorize → /callback → localhost:1455 整条 redirect 链.
+    URL 门控 + 排除 login form 的 intent button,失败用 force click 兜底。
     """
+    url_low = (page.url or "").lower()
+    if any(marker in url_low for marker in _NON_CONSENT_URL_MARKERS):
+        # 还在登录页 — 那个 Continue 是 email form 的 submit,跟 consent 不相关
+        logger.debug("[oauth] _click_consent_button 跳过(还在登录页): url=%s", url_low)
+        return False
+
     try:
         b = page.locator(_CONSENT_BUTTON_LOCATOR).first
-        if b.is_visible(timeout=5000):
-            b.click(timeout=5000)
-            logger.info("[oauth] consent %s点击成功", "(workspace 选完)" if after_workspace_pick else "")
-            time.sleep(5)
-            return True
+        if not b.is_visible(timeout=5000):
+            return False
     except Exception as exc:
-        logger.warning("[oauth] consent 按钮点击失败: %s", exc)
+        logger.debug("[oauth] consent 按钮 is_visible 异常: %s", exc)
+        return False
+
+    # 第一次尝试:正常 click(走 actionability 检查)
+    try:
+        b.click(timeout=5000)
+        logger.info("[oauth] consent %s点击成功", "(workspace 选完)" if after_workspace_pick else "")
+        time.sleep(5)
+        return True
+    except Exception as exc:
+        logger.warning("[oauth] consent 普通 click 失败,尝试 force: %s", str(exc)[:200])
+
+    # 第二次尝试:force click(跳过 enabled / stable 检查 — 适合 React 频繁重渲染场景)
+    try:
+        b.click(timeout=3000, force=True)
+        logger.info("[oauth] consent force click 成功")
+        time.sleep(5)
+        return True
+    except Exception as exc:
+        logger.warning("[oauth] consent force click 也失败: %s", str(exc)[:200])
+
     return False
 
 
