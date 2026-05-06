@@ -32,12 +32,20 @@ logger = logging.getLogger(__name__)
 
 
 _EMAIL_SELECTORS = (
-    'input[name="email"], input[type="email"], input[id="email"], '
+    'input[name="email"], input[name="username"], input[type="email"], input[id="email"], '
     'input[autocomplete="email"], input[autocomplete="username"], '
-    'input[placeholder*="email" i], input[placeholder*="Email" i]'
+    'input[placeholder*="email" i], input[placeholder*="Email" i], '
+    'input[placeholder*="电子邮件"], input[placeholder*="邮箱"], '
+    'input[placeholder*="メール"], input[placeholder*="이메일"]'
 )
-_PASSWORD_SELECTORS = 'input[name="password"], input[type="password"]'
-_CODE_SELECTORS = 'input[name="code"], input[placeholder*="验证码"], input[placeholder*="code" i]'
+_PASSWORD_SELECTORS = (
+    'input[name="password"], input[type="password"], '
+    'input[placeholder*="密码"], input[placeholder*="password" i]'
+)
+_CODE_SELECTORS = (
+    'input[name="code"], input[placeholder*="验证码"], input[placeholder*="code" i], '
+    'input[autocomplete*="one-time-code" i], input[inputmode="numeric"]'
+)
 
 SIGNUP_URL = "https://chatgpt.com/auth/login"
 
@@ -127,7 +135,8 @@ def _fill_email(page, email: str) -> None:
     for attempt in range(3):
         if _detect_step(page) != "email":
             return
-        ei = first_visible_editable(page, _EMAIL_SELECTORS, timeout=1500)
+        # 住宅代理 SPA 渲染稍慢,timeout 给到 4s
+        ei = first_visible_editable(page, _EMAIL_SELECTORS, timeout=4000)
         if not ei:
             if _wait_step_change(page, "email", timeout=10) != "email":
                 return
