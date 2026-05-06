@@ -370,31 +370,68 @@ def wait_cloudflare(page, max_wait_seconds: int = 120) -> bool:
 
 
 def type_otp_code(page, ci, code: str) -> None:
-    """适配单框 OTP 与 6 格数字盒子两种 UI。
+    """填 OTP 验证码 — 用真实键盘事件确保 React state 更新。
 
-    新版 OpenAI 用 6 个 maxlength=1 的 input,fill() 只能填第一格(剩 5 格空)
-    → 提交后报"验证码是必需的"。先 fill 一次,如果实际值不等于 code,
-    切换到 click + keyboard.type(浏览器自动 focus 跳到下一格)。
+    踩过的坑:
+    1. `Locator.fill()` 把值塞进 DOM 但 React 的 controlled input 不更新内部 state,
+       提交时 React 看到的值还是空 → "verification code is required"
+    2. 6 格分隔 UI:fill 只能填第一格(maxlength=1)
+    3. clean 残值:click 后先 Ctrl+A / Backspace 清空再敲
+
+    解决:`click → 清空 → keyboard.type` 模拟真人,React 接收 input 事件 → state 同步
+    填完读 input_value 验证,不一致直接 raise(让上游抛 RegisterFailed,绝不空提交)
     """
     import time as _t
 
     try:
+        ci.click()
+        _t.sleep(0.15)
+    except Exception as exc:
+        raise RuntimeError(f"OTP 输入框无法 click: {exc}") from exc
+
+    # 清空已有内容(可能是 placeholder 残留 / 之前的 fill)
+    try:
+        ci.press("ControlOrMeta+a", timeout=1000)
+        ci.press("Backspace", timeout=1000)
+        _t.sleep(0.1)
+    except Exception as exc:
+        logger.debug("[otp] 清空残值失败(可忽略): %s", exc)
+
+    # 模拟真实键盘逐字符敲入(每次 80ms 间隔,触发 input/change 事件)
+    try:
+        page.keyboard.type(code, delay=80)
+        _t.sleep(0.6)
+    except Exception as exc:
+        raise RuntimeError(f"OTP keyboard.type 异常: {exc}") from exc
+
+    # 验证 — 单框 UI 读 input_value
+    try:
+        actual = ci.input_value(timeout=1500)
+    except Exception:
+        actual = None
+
+    if actual and actual == code:
+        return  # 单框成功
+
+    # 单框值不匹配 → 可能是 6 格 UI(每格只 1 字符 → input_value 不会等于完整 code)
+    # 此时无法直接读完整值校验,但 keyboard.type 已经触发了所有事件,放行
+    if actual and len(actual) == 1 and code.startswith(actual):
+        logger.info("[otp] 检测到 6 格 UI(首格值=%r),已逐字敲入完整 code", actual)
+        return
+
+    # 真填错了 — 兜底 fill 一次
+    logger.warning("[otp] keyboard.type 后实际值=%r,期望=%r,fallback fill", actual, code)
+    try:
         ci.fill(code)
         _t.sleep(0.3)
         actual = ci.input_value(timeout=1500)
-        if actual == code:
-            return
-        logger.info("[otp] 单框 fill 失败(实际值=%r,期望=%r),切换分格输入", actual, code)
     except Exception as exc:
-        logger.debug("[otp] fill 异常,fallback 到 keyboard.type: %s", exc)
+        raise RuntimeError(f"OTP fill fallback 失败: {exc}") from exc
 
-    try:
-        ci.click()
-        _t.sleep(0.2)
-        page.keyboard.type(code, delay=80)
-        _t.sleep(0.5)
-    except Exception as exc:
-        logger.warning("[otp] keyboard.type 异常: %s", exc)
+    if actual != code:
+        raise RuntimeError(
+            f"OTP 填写失败:keyboard.type + fill 后实际值={actual!r},期望={code!r}",
+        )
 
 
 def first_visible_editable(page, selectors: str, timeout: int = 800):

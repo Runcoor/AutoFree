@@ -207,14 +207,23 @@ def _fill_otp(page, mail_client, email: str, *, mail_baseline_id: int) -> None:
         timeout=EMAIL_POLL_TIMEOUT,
     )
     logger.info("[register] 输入 OTP: %s", code)
-    type_otp_code(page, ci, code)
+    try:
+        type_otp_code(page, ci, code)
+    except RuntimeError as exc:
+        # type_otp_code 内部已确保填值或 raise — 走到这里说明 OTP 真没填进去,
+        # 绝对不能 click Continue(空字符串提交会被 OpenAI 报"verification code is required"
+        # 然后下游误判流程异常)
+        raise RegisterFailed(f"OTP 填写失败: {exc} | URL={page.url}") from exc
+
     click_primary_button(page, ci, ["Continue", "继续"])
 
     # 等离开 code 步骤(8s 内),否则说明填的 OTP 有问题 / 没填进去
     next_step = _wait_step_change(page, "code", timeout=12)
     if next_step == "code":
+        # 仍在 code 步骤 — 截图便于排查
+        safe_screenshot(page, SCREENSHOT_DIR / "05a_code_stuck.png")
         raise RegisterFailed(
-            f"OTP 提交后仍在 code 步骤 — OTP 可能没填进去 / 验证码无效 | URL={page.url}",
+            f"OTP 提交后仍在 code 步骤 — OTP 可能无效 / 已过期 / 浏览器卡住 | URL={page.url}",
         )
     logger.info("[register] OTP 提交后步骤: %s", next_step)
 
