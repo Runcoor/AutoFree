@@ -15,7 +15,7 @@ import time
 import uuid
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -843,18 +843,28 @@ def manual_add(
     }
 
 
+class ResumeAllParams(BaseModel):
+    emails: Optional[list[str]] = None  # 限定只 resume 这批(对应前端筛选 tab);None=全部
+
+
 @router.post("/resume-all", status_code=202)
 def resume_all(
+    params: ResumeAllParams = Body(default_factory=ResumeAllParams),
     db: Session = Depends(get_db),
     _user=Depends(require_user),
 ) -> dict:
-    """串行 resume 所有未解决的 pending(必须有密码才能跑)。
+    """串行 resume pending 列表。
+
+    body.emails 非空 → 只 resume 这些 email(配合前端「已付费」/「未付费」筛选 tab)
+    body.emails 为空 → resume 全部未解决 pending
 
     返回 {task_id, total, skipped_no_password}。前端订阅 SSE 看进度。
     """
-    pending_rows = db.execute(
-        select(PendingAccount).where(PendingAccount.resolved_at.is_(None))
-    ).scalars().all()
+    stmt = select(PendingAccount).where(PendingAccount.resolved_at.is_(None))
+    if params.emails:
+        wanted = {e.strip().lower() for e in params.emails if e and e.strip()}
+        stmt = stmt.where(PendingAccount.email.in_(wanted))
+    pending_rows = db.execute(stmt).scalars().all()
 
     # 全部纳入 — 缺密码的会自动走 email-only OTP 登录
     eligible: list[tuple[str, str | None, str]] = [
@@ -863,7 +873,7 @@ def resume_all(
     skipped_no_password = 0  # 不再跳过
 
     if not eligible:
-        raise HTTPException(400, "没有可继续验证的 pending")
+        raise HTTPException(400, "没有可继续验证的 pending(筛选范围内为空)")
 
     global _current
     with _lock:

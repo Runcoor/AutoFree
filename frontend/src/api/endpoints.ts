@@ -155,9 +155,10 @@ export const freegenApi = {
   resume: (email: string) =>
     api.post<{ task_id: string; batch_id: string; email: string; mode: 'resume' }>('/freegen/resume',
       { email }).then(r => r.data),
-  resumeAll: () =>
+  resumeAll: (emails?: string[]) =>
     api.post<{ task_id: string; total: number; skipped_no_password: number; mode: 'resume_all' }>(
       '/freegen/resume-all',
+      emails && emails.length > 0 ? { emails } : {},
     ).then(r => r.data),
   manualAdd: (accounts: { email: string; password?: string }[]) =>
     api.post<{

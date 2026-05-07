@@ -61,14 +61,17 @@ export function PendingPage() {
   }
 
   async function resumeAll() {
-    if (items.length === 0) {
-      push('没有可继续验证的号', 'danger')
+    if (filtered.length === 0) {
+      push('当前筛选下无可继续验证的号', 'danger')
       return
     }
-    if (!confirm(`继续验证全部 ${items.length} 个?(消耗 SMS 余额)`)) return
+    const scopeLabel = tab === 'paid' ? '已付费 ' : tab === 'unpaid' ? '未付费 ' : ''
+    if (!confirm(`继续验证${scopeLabel}${filtered.length} 个?(消耗 SMS 余额)`)) return
     setResumeAllBusy(true)
     try {
-      const r = await freegenApi.resumeAll()
+      // tab === 'all' 时不传 emails(后端走全量),否则只传 filtered 的 emails
+      const emails = tab === 'all' ? undefined : filtered.map((p) => p.email)
+      const r = await freegenApi.resumeAll(emails)
       push(`已启动批量 resume · ${r.total} 个号串行跑${r.skipped_no_password ? ` · 跳过 ${r.skipped_no_password} 个缺密码` : ''}`, 'success')
       const s = await freegenApi.status()
       setStatus(s && Object.keys(s).length === 0 ? null : s)
@@ -167,16 +170,23 @@ export function PendingPage() {
               停止
             </Button>
           )}
-          {!resumeRunning && items.length > 0 && (
+          {!resumeRunning && filtered.length > 0 && (
             <Button
               variant="primary"
               onClick={resumeAll}
               loading={resumeAllBusy}
               disabled={resumeAllBusy}
-              title="按队列串行重跑所有 pending 的 OAuth(无密码的会走邮箱 OTP)"
+              title={
+                tab === 'all'
+                  ? '按队列串行重跑全部 pending(无密码自动走邮箱 OTP)'
+                  : tab === 'paid'
+                    ? '只跑已付费的号(💰)— 这些 OpenAI 端 phone 已绑,通常不烧 5sim'
+                    : '只跑未付费的号 — 可能撞 phone gate 触发 5sim 救援'
+              }
             >
               <Zap className="w-3.5 h-3.5" />
-              一键继续全部
+              {tab === 'all' ? '一键继续全部' : tab === 'paid' ? '继续已付费' : '继续未付费'}
+              <span className="mono ml-1 opacity-80">({filtered.length})</span>
             </Button>
           )}
           <Button onClick={refresh}>
