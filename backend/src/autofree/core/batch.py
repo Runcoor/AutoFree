@@ -96,6 +96,11 @@ def run_batch(
 
     assert_configured()
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        from autofree.core.browser import cleanup_old_screenshots
+        cleanup_old_screenshots(days=7)
+    except Exception:
+        logger.debug("[batch] cleanup_old_screenshots 失败(忽略)", exc_info=True)
 
     # 入口清掉上一轮残留的 stop 信号 — 否则上次按了 Stop 之后没人 reset,新 batch 一启动就被中断
     reset_stop()
@@ -150,6 +155,7 @@ def run_batch(
                 append_pending_account(
                     email=email, password=password, batch_id=batch_id,
                     error_kind=error_kind, error=error,
+                    phone_verified=phone_paid,
                 )
                 if phone_paid:
                     logger.info("[batch] %s 已加入 pending(💰 已付费/手机已验证)", email)

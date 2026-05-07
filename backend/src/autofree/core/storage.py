@@ -78,6 +78,7 @@ def append_pending_account(
     batch_id: str = "",
     error_kind: str = "",
     error: str = "",
+    phone_verified: bool = False,
 ) -> Path:
     """注册成功但 OAuth 失败的号写到 pending 列表(全局,非 per-batch)。
 
@@ -92,6 +93,7 @@ def append_pending_account(
         "batch_id": batch_id,
         "error_kind": error_kind,
         "error": error,
+        "phone_verified": bool(phone_verified),
         "created_at": _utc_iso(time.time()),
     }
     with PENDING_FILE.open("a", encoding="utf-8") as f:

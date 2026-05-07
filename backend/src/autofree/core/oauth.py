@@ -21,7 +21,8 @@ import urllib.parse
 import requests
 from playwright.sync_api import sync_playwright
 
-from autofree.core.browser import (
+from autofree.core.browser import (  # noqa: F401
+    email_screenshot_scope,
     assert_not_blocked,
     click_primary_button,
     detect_phone_block,
@@ -1135,7 +1136,8 @@ def fetch_personal_bundle(
         launch_kwargs["proxy"] = proxy_opts
         logger.info("[oauth] 使用代理 session=%s server=%s", proxy_session_id, proxy_opts["server"])
 
-    with sync_playwright() as p:
+    with email_screenshot_scope(email) as _ss_dir, sync_playwright() as p:
+        logger.info("[oauth] 截图目录: %s", _ss_dir)
         browser = p.chromium.launch(**launch_kwargs)
         context = browser.new_context(**get_context_options())
 

@@ -1,7 +1,11 @@
 """截图列表 + 单图查看 — 用于 realtime log 失败时点开看浏览器最后状态。
 
-注意:截图按 stage 命名(`01_login_page_attempt1.png` 等),会被下一个号 overwrite。
-要看具体某号失败截图,得在它失败后立即查看。
+布局:`<SCREENSHOT_DIR>/<YYMMDD_HHMMSS>_<email-prefix>/<stage>.png` —
+每个号一个独立子目录,避免不同号互相覆盖。
+
+API:
+- GET /api/screenshots          列出所有截图(name 是相对 SCREENSHOT_DIR 的相对路径)
+- GET /api/screenshots/file?name=<rel> 取单图
 """
 
 from __future__ import annotations
@@ -22,20 +26,22 @@ router = APIRouter()
 
 @router.get("")
 def list_screenshots(_user=Depends(require_user)) -> dict:
-    """列出截图目录下所有 PNG/JPG 文件,按 mtime 降序。"""
+    """递归列出 SCREENSHOT_DIR 下所有图片,name 用相对路径(支持嵌套)。"""
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
     items = []
-    for p in SCREENSHOT_DIR.iterdir():
+    base = SCREENSHOT_DIR.resolve()
+    for p in SCREENSHOT_DIR.rglob("*"):
         if not p.is_file():
             continue
         if p.suffix.lower() not in (".png", ".jpg", ".jpeg"):
             continue
         try:
             st = p.stat()
-        except OSError:
+            rel = p.resolve().relative_to(base)
+        except (OSError, ValueError):
             continue
         items.append({
-            "name": p.name,
+            "name": str(rel),  # 相对路径 (e.g. "20260507_021530_user1/03_after_email.png")
             "size": st.st_size,
             "mtime": st.st_mtime,
             "mtime_iso": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(st.st_mtime)),
@@ -46,15 +52,16 @@ def list_screenshots(_user=Depends(require_user)) -> dict:
 
 @router.get("/file")
 def get_screenshot(
-    name: str = Query(..., description="文件名(无路径分隔符)"),
+    name: str = Query(..., description="相对 SCREENSHOT_DIR 的路径,允许子目录"),
     _user=Depends(require_user),
 ) -> FileResponse:
-    """返回指定截图。仅允许 SCREENSHOT_DIR 直接子文件,防路径穿越。"""
-    if "/" in name or "\\" in name or name.startswith(".") or ".." in name:
-        raise HTTPException(400, "非法文件名")
+    """返回指定截图。允许嵌套子目录,但严格防止路径穿越。"""
+    if "\\" in name or name.startswith("/") or name.startswith(".") or ".." in name.split("/"):
+        raise HTTPException(400, "非法路径")
     path = (SCREENSHOT_DIR / name).resolve()
+    base = SCREENSHOT_DIR.resolve()
     try:
-        path.relative_to(SCREENSHOT_DIR.resolve())
+        path.relative_to(base)
     except ValueError:
         raise HTTPException(400, "路径越界")
     if not path.is_file():

@@ -145,12 +145,91 @@ def get_context_options() -> dict:
     }
 
 
+import contextvars as _ctxvars
+from contextlib import contextmanager
+
+# 当前 register/oauth 调用栈下的"专属截图子目录" — None 表示落到 SCREENSHOT_DIR 根
+_CURRENT_SS_DIR: _ctxvars.ContextVar[Path | None] = _ctxvars.ContextVar(
+    "_CURRENT_SS_DIR", default=None,
+)
+
+
 def safe_screenshot(page, path: Path) -> None:
+    """截图;若当前 scope 设置了专属子目录,自动 redirect 到该子目录。
+
+    这样所有散落代码里的 `SCREENSHOT_DIR / "01_xxx.png"` 等调用,在 register_account
+    / fetch_personal_bundle 期间都会被自动重写到 per-email 子目录,无需改调用点。
+    """
     try:
+        override = _CURRENT_SS_DIR.get()
+        from autofree.core.config import SCREENSHOT_DIR as _ROOT
+        if override is not None and path.parent.resolve() == _ROOT.resolve():
+            path = override / path.name
         path.parent.mkdir(parents=True, exist_ok=True)
         page.screenshot(path=str(path), full_page=True)
     except Exception as exc:
         logger.debug("[browser] 截图失败 %s: %s", path, exc)
+
+
+@contextmanager
+def email_screenshot_scope(email: str):
+    """将本上下文内所有 SCREENSHOT_DIR 根下的截图,重定向到 per-email 子目录。
+
+    用法:
+        with email_screenshot_scope(email):
+            ...  # 内部所有 safe_screenshot(SCREENSHOT_DIR / "...") 自动落子目录
+    """
+    sub = per_email_screenshot_dir(email)
+    token = _CURRENT_SS_DIR.set(sub)
+    try:
+        yield sub
+    finally:
+        _CURRENT_SS_DIR.reset(token)
+
+
+def per_email_screenshot_dir(email: str, *, root: Path | None = None) -> Path:
+    """每个号一个独立截图子目录 — 避免不同号互相覆盖、误诊。
+
+    命名:`<YYMMDD_HHMMSS>_<email-prefix>` (邮箱清洗,只留 a-z0-9_-)。
+    """
+    import re
+    import time as _time
+    from autofree.core.config import SCREENSHOT_DIR
+    base = root or SCREENSHOT_DIR
+    safe = re.sub(r"[^a-z0-9_-]", "_", (email or "anon").lower())[:60] or "anon"
+    ts = _time.strftime("%Y%m%d_%H%M%S")
+    d = base / f"{ts}_{safe}"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def cleanup_old_screenshots(*, days: int = 7, root: Path | None = None) -> int:
+    """删除 mtime 超过 days 天的截图文件 + 空子目录。返回删除文件数。"""
+    import time as _time
+    from autofree.core.config import SCREENSHOT_DIR
+    base = root or SCREENSHOT_DIR
+    if not base.exists():
+        return 0
+    cutoff = _time.time() - days * 86400
+    removed = 0
+    for p in base.rglob("*"):
+        if p.is_file():
+            try:
+                if p.stat().st_mtime < cutoff:
+                    p.unlink()
+                    removed += 1
+            except OSError:
+                pass
+    # 第二轮删空子目录(自下而上)
+    for p in sorted(base.rglob("*"), key=lambda x: len(x.parts), reverse=True):
+        if p.is_dir() and p != base:
+            try:
+                p.rmdir()  # 只在空目录时成功
+            except OSError:
+                pass
+    if removed:
+        logger.info("[browser] cleanup_old_screenshots 删除 %d 个 >%dd 旧截图", removed, days)
+    return removed
 
 
 def page_excerpt(page, limit: int = 240) -> str:
