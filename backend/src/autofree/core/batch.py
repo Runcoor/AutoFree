@@ -25,6 +25,7 @@ from autofree.core.identity import random_password
 from autofree.core.mail import MailClient
 from autofree.core.oauth import fetch_personal_bundle
 from autofree.core.register import register_account
+from autofree.core.register_phone import register_phone_and_fetch_bundle
 from autofree.core.storage import append_account_line, append_pending_account, write_auth_json
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,7 @@ def run_batch(
     random_pool: list[str] | None = None,
     progress_cb: ProgressCb | None = None,
     batch_id: str | None = None,
+    reg_mode: str = "email",
 ) -> dict:
     """串行跑 count 个号。
 
@@ -70,9 +72,17 @@ def run_batch(
     - random_pool 非空 → 每个号从池里随机抽一个域名(同批可混用多个域名)
     - 否则用单域名 domain(整批共用)
 
+    reg_mode:
+    - 'email'(默认)→ 现有路径,cloud-mail 邮箱注册 → fetch_personal_bundle 取 token
+    - 'phone' → 新路径,SMS provider 买号 → 手机号注册 → 同一 SMS 订单 2 条 SMS 完成
+      OAuth → /add-email 用 cloud-mail 邮箱 → 拿 token。账号 phone_verified=True
+
     返回 {batch_id, batch_dir, total, ok, failed, results: [...] }。
     单个号失败不影响后续。
     """
+    reg_mode = (reg_mode or "email").strip().lower()
+    if reg_mode not in ("email", "phone"):
+        raise ValueError(f"reg_mode 必须是 email/phone,收到 {reg_mode!r}")
     if count <= 0:
         raise ValueError("count 必须 ≥ 1")
 
@@ -107,8 +117,8 @@ def run_batch(
 
     batch_id, batch_dir = _new_batch_dir(batch_id)
     logger.info("=" * 60)
-    logger.info("[batch] 启动 batch_id=%s count=%d domain=%s out=%s",
-                batch_id, count, display_domain, batch_dir)
+    logger.info("[batch] 启动 batch_id=%s count=%d domain=%s reg_mode=%s out=%s",
+                batch_id, count, display_domain, reg_mode, batch_dir)
     logger.info("=" * 60)
 
     def _emit(stage: str, info: dict[str, Any]) -> None:
@@ -118,7 +128,8 @@ def run_batch(
             except Exception:
                 logger.debug("[batch] progress_cb 异常(忽略)", exc_info=True)
 
-    _emit("started", {"count": count, "domain": display_domain, "batch_dir": str(batch_dir)})
+    _emit("started", {"count": count, "domain": display_domain, "batch_dir": str(batch_dir),
+                      "reg_mode": reg_mode})
 
     mail = MailClient()
     mail.login()
@@ -174,21 +185,43 @@ def run_batch(
             current_domain = pick_domain()
             address_id, email = mail.create_email(domain=current_domain)
             password = random_password()
-            record.update({"email": email, "password": password, "domain": current_domain})
-            logger.info("[batch] (%d/%d) 邮箱=%s 域名=%s", i, count, email, current_domain)
+            record.update({"email": email, "password": password, "domain": current_domain,
+                           "reg_mode": reg_mode})
+            logger.info("[batch] (%d/%d) 邮箱=%s 域名=%s reg_mode=%s",
+                        i, count, email, current_domain, reg_mode)
 
-            t0 = time.time()
-            ok, session_token = register_account(mail, email, password)
-            register_secs = time.time() - t0
-            if not ok:
-                raise RegisterFailed("register_account 返回 False")
-            register_done = True
+            if reg_mode == "phone":
+                # 手机号路径:register + OAuth + add-email + token 一个调用搞定
+                # 共享 1 个 SMS 订单 / 2 条 SMS。返回 bundle 已带 phone_verified=True 和 phone。
+                t0 = time.time()
+                try:
+                    bundle = register_phone_and_fetch_bundle(
+                        email=email, password=password, mail_client=mail,
+                    )
+                except (RegisterFailed, RegisterBlocked):
+                    # Phase 1 失败:OpenAI 上还没账号,email 没被绑过 → 安全 drop
+                    raise
+                except OAuthFailed:
+                    # Phase 2 失败:Phase 1 已完成(OpenAI 上账号已建),写 pending
+                    register_done = True
+                    raise
+                register_secs = time.time() - t0
+                oauth_secs = 0.0  # phone 路径 OAuth 时间合并在 register_secs
+                register_done = True
+            else:
+                # 邮箱路径(原有行为,1 字未改)
+                t0 = time.time()
+                ok, session_token = register_account(mail, email, password)
+                register_secs = time.time() - t0
+                if not ok:
+                    raise RegisterFailed("register_account 返回 False")
+                register_done = True
 
-            t1 = time.time()
-            bundle = fetch_personal_bundle(
-                email=email, password=password, mail_client=mail, session_token=session_token,
-            )
-            oauth_secs = time.time() - t1
+                t1 = time.time()
+                bundle = fetch_personal_bundle(
+                    email=email, password=password, mail_client=mail, session_token=session_token,
+                )
+                oauth_secs = time.time() - t1
 
             # 1) 写 auth.json — token 权威备份
             auth_path = write_auth_json(bundle, output_dir=batch_dir)

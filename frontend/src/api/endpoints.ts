@@ -100,6 +100,7 @@ export interface FreegenStatus {
   ok?: number; failed?: number; current_email?: string
   events?: { ts: number; stage: string; [k: string]: any }[]
   started_at?: number
+  reg_mode?: 'email' | 'phone'
 }
 export interface Batch {
   id: string; domain: string; count: number; status: string
@@ -138,13 +139,15 @@ export interface BatchDetail {
 }
 
 export const freegenApi = {
-  start: (count: number, domain?: string, domain_mode: 'fixed' | 'rotate' | 'random' = 'rotate') =>
+  start: (count: number, domain?: string, domain_mode: 'fixed' | 'rotate' | 'random' = 'rotate',
+         reg_mode: 'email' | 'phone' = 'email') =>
     api.post<{
       task_id: string; batch_id: string; domain: string
       domain_mode: 'fixed' | 'rotate' | 'random'
+      reg_mode: 'email' | 'phone'
       random_pool: string[]
       count: number
-    }>('/freegen/start', { count, domain, domain_mode }).then(r => r.data),
+    }>('/freegen/start', { count, domain, domain_mode, reg_mode }).then(r => r.data),
   stop: () => api.post<{ ok: true; msg: string }>('/freegen/stop').then(r => r.data),
   status: () => api.get<FreegenStatus>('/freegen/status').then(r => r.data),
   batches: (limit = 20) => api.get<{ items: Batch[] }>('/freegen/batches', { params: { limit } }).then(r => r.data.items),

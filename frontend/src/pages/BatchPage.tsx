@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Play, Square, RefreshCw, Filter, Sparkles, Check, Cloud, Pause, Trash2, ChevronDown, AlertCircle, Clock, ChevronRight, Terminal, Camera } from 'lucide-react'
+import { Play, Square, RefreshCw, Filter, Sparkles, Check, Cloud, Pause, Trash2, ChevronDown, AlertCircle, Clock, ChevronRight, Terminal, Camera, Mail, Smartphone } from 'lucide-react'
 import { accountsApi, domainsApi, freegenApi, type Batch, type BatchDetail, type FreegenStatus } from '../api/endpoints'
 import { Button, Card, CardBody, CardHeader, LiveDot, Pill, ProgressBar, useToast } from '../components/ui'
 import { ScreenshotsModal } from '../components/ScreenshotsModal'
@@ -7,6 +7,15 @@ import { ScreenshotsModal } from '../components/ScreenshotsModal'
 interface SseEvent { ts: number; stage: string; [k: string]: any }
 
 const PRESETS = [10, 30, 50, 100]
+const REG_MODE_KEY = 'autofree.regMode'
+
+function readRegMode(): 'email' | 'phone' {
+  try {
+    const v = localStorage.getItem(REG_MODE_KEY)
+    if (v === 'phone' || v === 'email') return v
+  } catch {}
+  return 'email'
+}
 
 export function BatchPage() {
   const [count, setCount] = useState(50)
@@ -15,8 +24,14 @@ export function BatchPage() {
   const [status, setStatus] = useState<FreegenStatus | null>(null)
   const [history, setHistory] = useState<Batch[]>([])
   const [busy, setBusy] = useState(false)
+  const [regMode, setRegMode] = useState<'email' | 'phone'>(() => readRegMode())
   const push = useToast((s) => s.push)
   const evtRef = useRef<EventSource | null>(null)
+
+  // 持久化注册方式选择
+  useEffect(() => {
+    try { localStorage.setItem(REG_MODE_KEY, regMode) } catch {}
+  }, [regMode])
 
   useEffect(() => { refreshAll() }, [])
 
@@ -189,11 +204,12 @@ export function BatchPage() {
       let dom: string | undefined
       if (domain === '__random__') mode = 'random'
       else if (domain) { mode = 'fixed'; dom = domain }
-      const r = await freegenApi.start(count, dom, mode)
-      const label = mode === 'random'
+      const r = await freegenApi.start(count, dom, mode, regMode)
+      const domLabel = mode === 'random'
         ? `随机域名(${r.random_pool.length} 个候选)`
         : `@${r.domain}`
-      push(`已启动批次 ${r.batch_id} · ${label} · ${r.count} 个号`, 'success')
+      const regLabel = regMode === 'phone' ? '📱手机号' : '📧邮箱'
+      push(`已启动批次 ${r.batch_id} · ${regLabel} · ${domLabel} · ${r.count} 个号`, 'success')
       const st = await freegenApi.status()
       setStatus(st)
     } catch (err: any) {
@@ -249,6 +265,49 @@ export function BatchPage() {
           }
         />
         <CardBody className="relative">
+          {/* 注册方式切换:邮箱(原有) / 手机号(新增) */}
+          <div className="field mb-4">
+            <label className="min-h-[18px]">注册方式</label>
+            <div className="inline-flex bg-bg-soft border border-line rounded-[12px] p-1 gap-1">
+              <button
+                type="button"
+                className={
+                  'flex items-center gap-1.5 px-4 h-[34px] rounded-[10px] text-[13px] font-medium transition ' +
+                  (regMode === 'email'
+                    ? 'grad-bg text-white shadow-glow'
+                    : 'text-ink-soft hover:text-ink')
+                }
+                onClick={() => setRegMode('email')}
+                disabled={running}
+                title="临时邮箱注册 · 收 OTP · 走原有稳定路径"
+              >
+                <Mail className="w-3.5 h-3.5" />
+                邮箱
+              </button>
+              <button
+                type="button"
+                className={
+                  'flex items-center gap-1.5 px-4 h-[34px] rounded-[10px] text-[13px] font-medium transition ' +
+                  (regMode === 'phone'
+                    ? 'grad-bg text-white shadow-glow'
+                    : 'text-ink-soft hover:text-ink')
+                }
+                onClick={() => setRegMode('phone')}
+                disabled={running}
+                title="SMS 接码注册 · 同号 2 条 SMS 共用 · 国家从接码服务配置读"
+              >
+                <Smartphone className="w-3.5 h-3.5" />
+                手机号
+              </button>
+            </div>
+            {regMode === 'phone' && (
+              <div className="text-[11.5px] text-ink-faint mt-1.5 leading-relaxed">
+                ⚠ 需在「设置 → 接码服务」配好 5sim / hero-sms key,国家从那里读
+                · 每号约消耗 1 个 SMS 订单(2 条短信)
+              </div>
+            )}
+          </div>
+
           <div className="grid gap-4 grid-cols-1 md:grid-cols-[1fr_1fr_auto]">
             <div className="field">
               <div className="flex items-center justify-between gap-2 min-h-[18px]">
@@ -500,7 +559,18 @@ export function BatchPage() {
                         </div>
                       </td>
                       <td>{b.count}</td>
-                      <td className="text-ink-soft mono">{b.domain === 'random' ? '🎲 随机' : `@${b.domain}`}</td>
+                      <td className="text-ink-soft mono">
+                        {(() => {
+                          const isPhone = b.domain.startsWith('phone:') || b.domain === 'phone'
+                          const inner = b.domain.replace(/^phone:?/, '')
+                          const tag = isPhone ? <span className="mr-1">📱</span> : null
+                          if (!inner || inner === 'phone') {
+                            return <>{tag}{isPhone ? '手机号' : '—'}</>
+                          }
+                          if (inner === 'random') return <>{tag}🎲 随机</>
+                          return <>{tag}@{inner}</>
+                        })()}
+                      </td>
                       <td>
                         <span className="text-success font-semibold">{b.ok}</span>
                         <span className="text-ink-faint"> · </span>

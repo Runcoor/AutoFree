@@ -247,6 +247,8 @@ class StartParams(BaseModel):
     # 'rotate' → round-robin 选 enabled 域名(整批共用一个,下批换下一个) — 默认
     # 'random' → 每个号从 enabled 域名池里随机抽
     domain_mode: str = Field(default="rotate")
+    # 'email'(默认) → cloud-mail 邮箱注册;'phone' → SMS provider 手机号注册 + 邮箱绑定
+    reg_mode: str = Field(default="email")
 
     @field_validator("domain")
     @classmethod
@@ -262,6 +264,14 @@ class StartParams(BaseModel):
         v = (v or "rotate").strip().lower()
         if v not in ("fixed", "rotate", "random"):
             raise ValueError("domain_mode 必须是 fixed/rotate/random 之一")
+        return v
+
+    @field_validator("reg_mode")
+    @classmethod
+    def _check_reg_mode(cls, v):
+        v = (v or "email").strip().lower()
+        if v not in ("email", "phone"):
+            raise ValueError("reg_mode 必须是 email/phone 之一")
         return v
 
 
@@ -536,7 +546,8 @@ def _runner_manual_batch(task_id: str, items: list[tuple[str, str | None]]) -> N
         state["events"].append({"ts": time.time(), "stage": "task_ended", "status": finished})
 
 
-def _runner(task_id: str, count: int, domain: str | None, random_pool: list[str] | None) -> None:
+def _runner(task_id: str, count: int, domain: str | None, random_pool: list[str] | None,
+            reg_mode: str = "email") -> None:
     from autofree.core.batch import run_batch
 
     state = _current
@@ -544,9 +555,15 @@ def _runner(task_id: str, count: int, domain: str | None, random_pool: list[str]
 
     state["stage"] = "starting"
     state["started_at"] = time.time()
+    state["reg_mode"] = reg_mode
 
     # 落 Batch 行 — 随机模式下 DB.domain 存 'random' 占位,具体每号域名在 Account.email 里
-    db_domain = "random" if random_pool else (domain or "")
+    # phone 模式 domain 占位标识 'phone-<原 domain>',便于在批次列表里一眼区分
+    if reg_mode == "phone":
+        base_domain = "random" if random_pool else (domain or "")
+        db_domain = f"phone:{base_domain}" if base_domain else "phone"
+    else:
+        db_domain = "random" if random_pool else (domain or "")
     with SessionLocal() as db:
         b = Batch(id=state["batch_id"], domain=db_domain, count=count, status="running",
                   started_at=_utcnow())
@@ -587,6 +604,7 @@ def _runner(task_id: str, count: int, domain: str | None, random_pool: list[str]
             random_pool=random_pool,
             progress_cb=_cb,
             batch_id=state["batch_id"],
+            reg_mode=reg_mode,
         )
         state["result"] = result
     except Exception as exc:
@@ -657,6 +675,7 @@ def start(
             "stop_requested": False,
             "thread": None,
             "started_at": None,
+            "reg_mode": params.reg_mode,
         }
 
         # 清掉历史 stop 信号
@@ -665,7 +684,7 @@ def start(
 
         t = threading.Thread(
             target=_runner,
-            args=(task_id, params.count, single_domain, random_pool),
+            args=(task_id, params.count, single_domain, random_pool, params.reg_mode),
             name=f"freegen-{task_id}", daemon=True,
         )
         _current["thread"] = t
@@ -676,6 +695,7 @@ def start(
         "domain": display_domain, "domain_mode": params.domain_mode,
         "random_pool": random_pool or [],
         "count": params.count,
+        "reg_mode": params.reg_mode,
     }
 
 
