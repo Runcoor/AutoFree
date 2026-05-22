@@ -102,7 +102,7 @@ CODE_INPUT_SELECTORS = (
 
 # SMS 等待参数
 SMS_WAIT_SECONDS = 120
-MAX_SMS_BUY_ATTEMPTS = 3  # 整个流程最多换号几次(NO_NUMBERS / 死号)
+MAX_SMS_BUY_ATTEMPTS = 10  # 整个流程最多换号几次(NO_NUMBERS / 死号 / 二手号)
 
 
 # ─── 通用工具(为手机号路径单独实现,免污染 oauth.py)──────────────────────────
