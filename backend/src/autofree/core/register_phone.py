@@ -991,11 +991,14 @@ def _phase1_signup(
 
     # 6) 后续:密码 / about-you 循环
     last_url = ""
+    # 诊断计数:Phase 1 是否真的走过密码页 / about-you 等
+    diag_counts = {"pw_hit": 0, "about_you_hit": 0, "fallback_hit": 0, "rounds": 0}
     for round_idx in range(20):
         if is_stop_requested():
             raise BatchStopped("phone reg phase1 完成资料阶段收到 stop")
 
         _sleep(3)
+        diag_counts["rounds"] = round_idx + 1
         try:
             url = (page.url or "").lower()
             inputs_info = page.evaluate(
@@ -1009,9 +1012,27 @@ def _phase1_signup(
             last_url = ""
             continue
 
+        # 诊断:每轮记录 url + input 摘要(只有 url 变化才打印,避免刷屏)
+        if url != last_url:
+            input_types = [i.get("type") for i in inputs_info if i.get("type")]
+            logger.info(
+                "[phone-reg] [DIAG] phase1 r%d url=%s inputs=%s body[:120]=%r",
+                round_idx, url[:120], input_types[:8], (body_text or "")[:120],
+            )
+
         # 完成:落 chatgpt.com 主页
         if "chatgpt.com" in url and "auth.openai.com" not in url and "/auth/" not in url:
-            logger.info("[phone-reg] ✅ Phase 1 完成,落 chatgpt.com 主页: %s", url)
+            logger.info(
+                "[phone-reg] ✅ Phase 1 完成,落 chatgpt.com 主页: %s | "
+                "[DIAG] phase1 终态汇总 rounds=%d pw_hit=%d about_you_hit=%d fallback_hit=%d",
+                url, diag_counts["rounds"], diag_counts["pw_hit"],
+                diag_counts["about_you_hit"], diag_counts["fallback_hit"],
+            )
+            if diag_counts["pw_hit"] == 0:
+                logger.warning(
+                    "[phone-reg] [DIAG] ⚠️ Phase 1 全程未命中密码页 — 账号可能没有密码,"
+                    "Phase 2 若出现 /log-in/password 不能用 password 参数填(会被判为密码错)"
+                )
             safe_screenshot(page, SCREENSHOT_DIR / "phone_09_chatgpt_landing.png")
             return order, phone_e164
 
@@ -1021,7 +1042,11 @@ def _phase1_signup(
 
         # 密码页
         if is_pw_page:
-            logger.info("[phone-reg] phase1 r%d 密码页 url=%s", round_idx, url[:80])
+            diag_counts["pw_hit"] += 1
+            logger.info(
+                "[phone-reg] [DIAG] phase1 r%d 命中密码页(#%d) url=%s",
+                round_idx, diag_counts["pw_hit"], url[:80],
+            )
             _fill_password_input(page, password)
             _click_submit_button(page)
             _sleep(3)
@@ -1032,7 +1057,11 @@ def _phase1_signup(
 
         # about-you
         if "about-you" in url or "about_you" in url or "确认一下你的年龄" in body_text:
-            logger.info("[phone-reg] phase1 r%d about-you 页 url=%s", round_idx, url[:80])
+            diag_counts["about_you_hit"] += 1
+            logger.info(
+                "[phone-reg] [DIAG] phase1 r%d 命中 about-you(#%d) url=%s",
+                round_idx, diag_counts["about_you_hit"], url[:80],
+            )
             _fill_about_you(page, full_name, birth)
             _sleep(5)
             wait_cloudflare(page, max_wait_seconds=60)
@@ -1044,10 +1073,19 @@ def _phase1_signup(
         for btn_texts in (("同意", "Agree", "Accept", "I'm okay", "好的", "确定"),
                           SUBMIT_BUTTON_TEXTS):
             if _click_button_by_text(page, btn_texts, timeout_ms=1500):
-                logger.debug("[phone-reg] phase1 r%d 兜底点击", round_idx)
+                diag_counts["fallback_hit"] += 1
+                logger.info(
+                    "[phone-reg] [DIAG] phase1 r%d 兜底点击命中(#%d) url=%s btn_set=%s",
+                    round_idx, diag_counts["fallback_hit"], url[:80], btn_texts[:3],
+                )
                 break
 
     safe_screenshot(page, SCREENSHOT_DIR / "phone_10_phase1_timeout.png")
+    logger.error(
+        "[phone-reg] [DIAG] phase1 超时汇总 rounds=%d pw_hit=%d about_you_hit=%d fallback_hit=%d last_url=%s",
+        diag_counts["rounds"], diag_counts["pw_hit"],
+        diag_counts["about_you_hit"], diag_counts["fallback_hit"], page.url,
+    )
     raise RegisterFailed(f"Phase 1 完成资料阶段超时 (20 轮),最后 url={page.url}")
 
 
@@ -1140,7 +1178,12 @@ def _phase2_oauth(
 
         if url == last_url:
             continue
-        logger.info("[phone-reg] phase2 r%d url=%s", round_idx, url[:90])
+        # 诊断:每次 URL 变化都 dump 一份 inputs / buttons / body 片段
+        input_types = [i.get("type") for i in inputs_info if i.get("type")]
+        logger.info(
+            "[phone-reg] [DIAG] phase2 r%d url=%s inputs=%s btns=%s body[:200]=%r",
+            round_idx, url[:120], input_types[:8], btns_info[:10], (body_text or "")[:200],
+        )
 
         # 1) 登录/注册选择页 — 找「继续使用手机登录」入口
         has_phone_login_btn = any(any(t in b for t in PHONE_LOGIN_TEXTS) for b in btns_info)
@@ -1268,6 +1311,21 @@ def _phase2_oauth(
         # 7) 密码页 — Phase 1 设过密码,这里用同一个密码登录(对照 JS 参考 browserService.js:1607-1654)
         is_pw_page = "password" in url_low or any(i.get("type") == "password" for i in inputs_info)
         if is_pw_page:
+            # 诊断:dump 页面所有 a / [role=link] / 副按钮 — 看 OpenAI 是否给了「用其他方式登录」「忘记密码」入口
+            try:
+                links_info = page.evaluate(
+                    """() => Array.from(document.querySelectorAll('a, [role="link"]')).map(a => ({
+                        text: (a.innerText || a.textContent || '').trim().slice(0, 80),
+                        href: a.getAttribute('href') || '',
+                    })).filter(x => x.text)"""
+                )
+            except Exception:
+                links_info = []
+            logger.info(
+                "[phone-reg] [DIAG] phase2 r%d 密码页全量 dump | url=%s | inputs=%s | btns=%s | links=%s | body[:300]=%r",
+                round_idx, url, input_types[:10], btns_info[:15], links_info[:15],
+                (body_text or "")[:300],
+            )
             if not password:
                 safe_screenshot(page, SCREENSHOT_DIR / "phone_29_password_empty.png")
                 raise OAuthFailed("OAuth 密码页出现但 password 参数为空 — Phase 1 未设密码?")
