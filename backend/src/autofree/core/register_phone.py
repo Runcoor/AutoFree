@@ -698,46 +698,12 @@ def _phase1_signup(
     _sleep(3)
     _dismiss_cookie_banner(page)
 
-    # 1) 点「免费注册」(等按钮渲染)
-    if not _wait_button_by_text(page, SIGNUP_BUTTON_TEXTS, timeout_ms=30000):
-        safe_screenshot(page, SCREENSHOT_DIR / "phone_01a_no_signup_button.png")
-        # 诊断:dump 页面实际内容 — 区域限制 / Access denied / CF 五秒盾 / 异常 landing
-        try:
-            cur_url = page.url
-            title = page.title()
-            body_text = page.locator("body").inner_text(timeout=2000) or ""
-            visible_buttons = page.evaluate(
-                """() => {
-                    const out = [];
-                    for (const b of document.querySelectorAll('button, [role="button"], a')) {
-                        const t = (b.innerText || b.textContent || '').trim();
-                        if (!t) continue;
-                        const rect = b.getBoundingClientRect();
-                        if (rect.width <= 0 || rect.height <= 0) continue;
-                        out.push(t.slice(0, 80));
-                        if (out.length >= 30) break;
-                    }
-                    return out;
-                }"""
-            )
-            logger.error(
-                "[phone-reg] [DIAG] phase1 landing 异常 | url=%s | title=%r | "
-                "visible_buttons=%s | body[:800]=%r",
-                cur_url, title, visible_buttons, (body_text or "")[:800],
-            )
-        except Exception as diag_exc:
-            logger.error("[phone-reg] [DIAG] landing 诊断 dump 失败: %s", diag_exc)
-        raise RegisterFailed(f"30s 内未见「{'/'.join(SIGNUP_BUTTON_TEXTS)}」按钮 — 页面可能没渲染好")
-    # 等 React 事件处理器绑定(对照 JS 版本 5s)
-    _sleep(5)
-    url_before_click = page.url
-
     def _signup_ready() -> str | None:
         """判定注册流程已就绪 — 任一信号命中即可:
-        1) 弹窗/起始页文案出现
-        2) 手机登录按钮直接可见
-        3) URL 已跳到 auth.openai.com(整页导航变体)
-        4) 手机号输入框已渲染(极少见但作兜底)
+        1) URL 已跳到 auth.openai.com(整页导航变体)
+        2) 手机号输入框已渲染(极少见但作兜底)
+        3) 手机登录按钮直接可见(新版 chatgpt.com 直接落「Log in or sign up」页)
+        4) 弹窗/起始页文案出现
         返回命中的信号描述,None 表示尚未就绪。"""
         try:
             if "auth.openai.com" in (page.url or ""):
@@ -768,25 +734,67 @@ def _phase1_signup(
             return "modal text matched"
         return None
 
+    url_before_click = page.url
     modal_ready_reason: str | None = None
-    for attempt in range(1, 4):
-        if not _click_button_by_text(page, SIGNUP_BUTTON_TEXTS, timeout_ms=8000):
-            logger.warning("[phone-reg] 第 %d 次点免费注册失败", attempt)
-            _sleep(2)
-            continue
-        # 轮询 30s,任一就绪信号命中就过
-        deadline = time.time() + 30
-        while time.time() < deadline:
-            sig = _signup_ready()
-            if sig:
-                modal_ready_reason = sig
+
+    # 1) 优先检测:chatgpt.com 可能直接落在「Log in or sign up」页(新版,无 landing CTA),
+    #    或已自动跳到 auth.openai.com — 这两种情况都不需要点「免费注册」。
+    initial_sig = _signup_ready()
+    if initial_sig:
+        modal_ready_reason = initial_sig
+        logger.info("[phone-reg] chatgpt.com 直接进入登录/注册页 — 跳过「免费注册」步骤,就绪信号: %s", initial_sig)
+    else:
+        # 老版 landing — 需要先点「免费注册」CTA
+        if not _wait_button_by_text(page, SIGNUP_BUTTON_TEXTS, timeout_ms=30000):
+            safe_screenshot(page, SCREENSHOT_DIR / "phone_01a_no_signup_button.png")
+            # 诊断:dump 页面实际内容 — 区域限制 / Access denied / CF 五秒盾 / 异常 landing
+            try:
+                cur_url = page.url
+                title = page.title()
+                body_text = page.locator("body").inner_text(timeout=2000) or ""
+                visible_buttons = page.evaluate(
+                    """() => {
+                        const out = [];
+                        for (const b of document.querySelectorAll('button, [role="button"], a')) {
+                            const t = (b.innerText || b.textContent || '').trim();
+                            if (!t) continue;
+                            const rect = b.getBoundingClientRect();
+                            if (rect.width <= 0 || rect.height <= 0) continue;
+                            out.push(t.slice(0, 80));
+                            if (out.length >= 30) break;
+                        }
+                        return out;
+                    }"""
+                )
+                logger.error(
+                    "[phone-reg] [DIAG] phase1 landing 异常 | url=%s | title=%r | "
+                    "visible_buttons=%s | body[:800]=%r",
+                    cur_url, title, visible_buttons, (body_text or "")[:800],
+                )
+            except Exception as diag_exc:
+                logger.error("[phone-reg] [DIAG] landing 诊断 dump 失败: %s", diag_exc)
+            raise RegisterFailed(f"30s 内未见「{'/'.join(SIGNUP_BUTTON_TEXTS)}」按钮 — 页面可能没渲染好")
+        # 等 React 事件处理器绑定(对照 JS 版本 5s)
+        _sleep(5)
+
+        for attempt in range(1, 4):
+            if not _click_button_by_text(page, SIGNUP_BUTTON_TEXTS, timeout_ms=8000):
+                logger.warning("[phone-reg] 第 %d 次点免费注册失败", attempt)
+                _sleep(2)
+                continue
+            # 轮询 30s,任一就绪信号命中就过
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                sig = _signup_ready()
+                if sig:
+                    modal_ready_reason = sig
+                    break
+                time.sleep(0.5)
+            if modal_ready_reason:
+                logger.info("[phone-reg] 注册起始页就绪 (attempt=%d): %s", attempt, modal_ready_reason)
                 break
-            time.sleep(0.5)
-        if modal_ready_reason:
-            logger.info("[phone-reg] 注册起始页就绪 (attempt=%d): %s", attempt, modal_ready_reason)
-            break
-        logger.warning("[phone-reg] 第 %d 次未检测到就绪信号 (url=%s)", attempt, page.url)
-        _sleep(2)
+            logger.warning("[phone-reg] 第 %d 次未检测到就绪信号 (url=%s)", attempt, page.url)
+            _sleep(2)
     if not modal_ready_reason:
         safe_screenshot(page, SCREENSHOT_DIR / "phone_01b_no_modal.png")
         # dump 页面诊断信息便于排查
