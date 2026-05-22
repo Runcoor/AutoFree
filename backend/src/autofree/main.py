@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -11,6 +12,24 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from autofree.settings import get_settings
+
+
+def _setup_logging() -> None:
+    """配置 root logger — 否则默认 WARNING,autofree.* 的 INFO 不输出。
+
+    LOG_LEVEL 环境变量可覆盖(默认 INFO)。统一格式带 logger 名,方便 grep。
+    """
+    level_name = (os.environ.get("LOG_LEVEL") or "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    # force=True 覆盖 uvicorn / 其他库可能预设的 handler,保证我们的格式生效
+    logging.basicConfig(
+        level=level,
+        format="%(levelname)-5s [%(name)s] %(message)s",
+        force=True,
+    )
+
+
+_setup_logging()
 
 logger = logging.getLogger(__name__)
 

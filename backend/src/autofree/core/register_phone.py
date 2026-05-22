@@ -59,6 +59,8 @@ logger = logging.getLogger(__name__)
 # ─── 双语按钮 / 文本常量 ─────────────────────────────────────────────────────
 
 SIGNUP_BUTTON_TEXTS = ("免费注册", "Sign up for free", "Sign up")
+# 密码页底部「Don't have an account? Sign up」链接 — 用于把 login 流程切到 signup
+SIGN_UP_LINK_TEXTS = ("Sign up", "注册", "立即注册", "Create account", "创建账号")
 # 弹窗 / 注册起始页可能出现的任一文案 — 命中任一即视为就绪
 SIGNUP_MODAL_TEXTS = (
     "登录或注册", "Log in or sign up", "Welcome back",
@@ -929,22 +931,70 @@ def _phase1_signup(
             _sleep(1)
 
         if not sms_visible:
-            # 也许直接到了密码页(部分账号不需要 SMS,直接走密码)
+            # OpenAI 新流程:提交手机号后直接落「Enter your password」页 —
+            #   - 号被识别为已存在账号(SMS 不发) → 页面无「Sign up」链接 → 这号没用,ban
+            #   - 号是新号但默认走 login UI → 页面有「Don't have an account? Sign up」链接 →
+            #     点链接切到 signup 流程,再次等 SMS code
             try:
-                if page.locator(PASSWORD_INPUT_SELECTOR).first.is_visible(timeout=2000):
-                    logger.info("[phone-reg] 跳过 SMS,直接到密码页(罕见)")
-                    # 这种情况买的号没意义,但已扣费,留着 — 至少号有效
-                    _fill_password_input(page, password)
-                    _click_submit_button(page)
-                    return order, phone_e164
+                is_pw_page = page.locator(PASSWORD_INPUT_SELECTOR).first.is_visible(timeout=2000)
             except Exception:
-                pass
-            logger.warning("[phone-reg] 提交手机号后 15s 未见 code 框 — 号可能被拒")
-            safe_screenshot(page, SCREENSHOT_DIR / f"phone_06_no_code_input_a{attempt}.png")
-            _safe_refund(sms_provider, order, "ban")
-            last_err = RegisterBlocked("phone_reg",
-                                       "提交手机号后未出现 SMS 输入框", is_phone=True)
-            continue
+                is_pw_page = False
+
+            if is_pw_page:
+                safe_screenshot(page, SCREENSHOT_DIR / f"phone_05b_password_page_a{attempt}.png")
+                # 找底部 Sign up 链接 — 命中说明这号可能是新号,OpenAI 默认 login UI 提供了切到 signup 的入口
+                signup_clicked = _click_button_by_text(page, SIGN_UP_LINK_TEXTS, timeout_ms=2500)
+                if signup_clicked:
+                    logger.info(
+                        "[phone-reg] 密码页底部「Sign up」链接命中,切到 signup attempt=%d", attempt,
+                    )
+                    _sleep(3)
+                    wait_cloudflare(page, max_wait_seconds=30)
+                    _sleep(2)
+                    # 重新等 SMS code 输入框
+                    for _ in range(15):
+                        try:
+                            for sel in CODE_INPUT_SELECTORS:
+                                if page.locator(sel).first.is_visible(timeout=600):
+                                    sms_visible = True
+                                    break
+                            if sms_visible:
+                                break
+                        except Exception:
+                            pass
+                        _sleep(1)
+                    if sms_visible:
+                        logger.info("[phone-reg] 点 Sign up 后 SMS code 框出现,继续 attempt=%d", attempt)
+                    else:
+                        logger.warning(
+                            "[phone-reg] 点 Sign up 后仍未见 SMS code 框 attempt=%d — 号可能仍被拒",
+                            attempt,
+                        )
+                        safe_screenshot(page, SCREENSHOT_DIR / f"phone_06_no_code_after_signup_a{attempt}.png")
+                        _safe_refund(sms_provider, order, "ban")
+                        last_err = RegisterBlocked("phone_reg",
+                                                   "切到 signup 后仍未见 SMS 输入框", is_phone=True)
+                        continue
+                else:
+                    # 没找到 Sign up 链接 → 号被识别为已存在账号(可能是 SMS provider 给的二手号)
+                    logger.warning(
+                        "[phone-reg] 密码页无「Sign up」链接 — 号 %s 被 OpenAI 识别为已存在账号,ban 换号 attempt=%d",
+                        phone_e164, attempt,
+                    )
+                    _safe_refund(sms_provider, order, "ban")
+                    last_err = RegisterBlocked(
+                        "phone_reg",
+                        f"号 {phone_e164} 被识别为已存在账号(二手号?),无 Sign up 链接",
+                        is_phone=True,
+                    )
+                    continue
+            else:
+                logger.warning("[phone-reg] 提交手机号后 15s 未见 code 框也未见密码页 — 号可能被拒")
+                safe_screenshot(page, SCREENSHOT_DIR / f"phone_06_no_code_input_a{attempt}.png")
+                _safe_refund(sms_provider, order, "ban")
+                last_err = RegisterBlocked("phone_reg",
+                                           "提交手机号后未出现 SMS 输入框", is_phone=True)
+                continue
 
         # 等 SMS
         logger.info("[phone-reg] 等 SMS#1 attempt=%d order=%d", attempt, order.id)
