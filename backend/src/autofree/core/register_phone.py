@@ -1062,6 +1062,7 @@ def _phase2_oauth(
     phone_e164: str,
     email_for_bind: str,
     mail_client,
+    password: str,
     *,
     capture_callback,
 ) -> bool:
@@ -1264,12 +1265,49 @@ def _phase2_oauth(
             last_url = url
             continue
 
-        # 7) 密码页(罕见 — 手机号注册号默认无密码,这里直接抛错)
+        # 7) 密码页 — Phase 1 设过密码,这里用同一个密码登录(对照 JS 参考 browserService.js:1607-1654)
         is_pw_page = "password" in url_low or any(i.get("type") == "password" for i in inputs_info)
         if is_pw_page:
-            logger.warning("[phone-reg] phase2 r%d 密码页(意外):url=%s", round_idx, url[:80])
-            safe_screenshot(page, SCREENSHOT_DIR / "phone_29_unexpected_password.png")
-            raise OAuthFailed("手机号注册号 OAuth 阶段意外要求密码 — 流程可能被风控介入")
+            if not password:
+                safe_screenshot(page, SCREENSHOT_DIR / "phone_29_password_empty.png")
+                raise OAuthFailed("OAuth 密码页出现但 password 参数为空 — Phase 1 未设密码?")
+            logger.info("[phone-reg] phase2 r%d 密码页,填密码 url=%s", round_idx, url[:80])
+            try:
+                _fill_password_input(page, password)
+            except Exception as exc:
+                safe_screenshot(page, SCREENSHOT_DIR / "phone_29_password_fill_failed.png")
+                raise OAuthFailed(f"OAuth 密码填写失败: {exc}") from exc
+            _sleep(0.5)
+            # 优先回车提交(OpenAI 登录页支持),再补一次按钮点击
+            try:
+                page.keyboard.press("Enter")
+            except Exception:
+                pass
+            _sleep(1)
+            _click_submit_button(page)
+            _sleep(4)
+            wait_cloudflare(page, max_wait_seconds=60)
+            _sleep(2)
+            safe_screenshot(page, SCREENSHOT_DIR / "phone_29b_after_password.png")
+            # 密码错检测:仍在密码页 → 抛错
+            try:
+                still_pw = page.locator(PASSWORD_INPUT_SELECTOR).first.is_visible(timeout=2000)
+            except Exception:
+                still_pw = False
+            if still_pw and "password" in (page.url or "").lower():
+                # 检查页面是否有「密码错」错误提示
+                try:
+                    body_low = (page.locator("body").inner_text(timeout=1500) or "").lower()
+                except Exception:
+                    body_low = ""
+                err_markers = ("incorrect", "wrong password", "密码错", "密码不", "invalid password")
+                if any(m in body_low for m in err_markers):
+                    raise OAuthFailed(
+                        "OAuth 密码错误 — Phase 1 设的密码和 Phase 2 不一致(可能 chatgpt.com 注册流程没设密码就直跳了)"
+                    )
+                logger.warning("[phone-reg] phase2 r%d 密码提交后仍在密码页(未见明确错误),继续重试", round_idx)
+            last_url = url
+            continue
 
         # 8) consent 页面:点 Allow/Continue
         if "/consent" in url_low or "/authorize" in url_low:
@@ -1389,6 +1427,7 @@ def register_phone_and_fetch_bundle(
             _phase2_oauth(
                 page, auth_url, sms_provider, order, country, phone_e164,
                 email_for_bind=email, mail_client=mail_client,
+                password=password,
                 capture_callback=_capture,
             )
 
