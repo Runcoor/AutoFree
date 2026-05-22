@@ -701,6 +701,32 @@ def _phase1_signup(
     # 1) 点「免费注册」(等按钮渲染)
     if not _wait_button_by_text(page, SIGNUP_BUTTON_TEXTS, timeout_ms=30000):
         safe_screenshot(page, SCREENSHOT_DIR / "phone_01a_no_signup_button.png")
+        # 诊断:dump 页面实际内容 — 区域限制 / Access denied / CF 五秒盾 / 异常 landing
+        try:
+            cur_url = page.url
+            title = page.title()
+            body_text = page.locator("body").inner_text(timeout=2000) or ""
+            visible_buttons = page.evaluate(
+                """() => {
+                    const out = [];
+                    for (const b of document.querySelectorAll('button, [role="button"], a')) {
+                        const t = (b.innerText || b.textContent || '').trim();
+                        if (!t) continue;
+                        const rect = b.getBoundingClientRect();
+                        if (rect.width <= 0 || rect.height <= 0) continue;
+                        out.push(t.slice(0, 80));
+                        if (out.length >= 30) break;
+                    }
+                    return out;
+                }"""
+            )
+            logger.error(
+                "[phone-reg] [DIAG] phase1 landing 异常 | url=%s | title=%r | "
+                "visible_buttons=%s | body[:800]=%r",
+                cur_url, title, visible_buttons, (body_text or "")[:800],
+            )
+        except Exception as diag_exc:
+            logger.error("[phone-reg] [DIAG] landing 诊断 dump 失败: %s", diag_exc)
         raise RegisterFailed(f"30s 内未见「{'/'.join(SIGNUP_BUTTON_TEXTS)}」按钮 — 页面可能没渲染好")
     # 等 React 事件处理器绑定(对照 JS 版本 5s)
     _sleep(5)
