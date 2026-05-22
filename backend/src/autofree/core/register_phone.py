@@ -59,7 +59,15 @@ logger = logging.getLogger(__name__)
 # ─── 双语按钮 / 文本常量 ─────────────────────────────────────────────────────
 
 SIGNUP_BUTTON_TEXTS = ("免费注册", "Sign up for free", "Sign up")
-SIGNUP_MODAL_TEXTS = ("登录或注册", "Log in or sign up", "Welcome back")
+# 弹窗 / 注册起始页可能出现的任一文案 — 命中任一即视为就绪
+SIGNUP_MODAL_TEXTS = (
+    "登录或注册", "Log in or sign up", "Welcome back",
+    "Create your account", "创建账户", "创建账号",
+    "Welcome to ChatGPT", "欢迎来到 ChatGPT", "欢迎使用 ChatGPT",
+    "Sign in to your account", "登录您的账户",
+    "继续使用手机登录", "手机登录", "Continue with phone", "Use phone",
+    "Continue with email", "继续使用邮箱",
+)
 PHONE_LOGIN_TEXTS = ("继续使用手机登录", "手机登录", "Continue with phone", "Use phone")
 SUBMIT_BUTTON_TEXTS = ("继续", "Continue", "Next", "下一步")
 FINISH_BUTTON_TEXTS = ("完成", "Finish", "Done", "Submit")
@@ -694,22 +702,94 @@ def _phase1_signup(
     if not _wait_button_by_text(page, SIGNUP_BUTTON_TEXTS, timeout_ms=30000):
         safe_screenshot(page, SCREENSHOT_DIR / "phone_01a_no_signup_button.png")
         raise RegisterFailed(f"30s 内未见「{'/'.join(SIGNUP_BUTTON_TEXTS)}」按钮 — 页面可能没渲染好")
-    _sleep(2)
+    # 等 React 事件处理器绑定(对照 JS 版本 5s)
+    _sleep(5)
+    url_before_click = page.url
 
-    modal_ready = False
+    def _signup_ready() -> str | None:
+        """判定注册流程已就绪 — 任一信号命中即可:
+        1) 弹窗/起始页文案出现
+        2) 手机登录按钮直接可见
+        3) URL 已跳到 auth.openai.com(整页导航变体)
+        4) 手机号输入框已渲染(极少见但作兜底)
+        返回命中的信号描述,None 表示尚未就绪。"""
+        try:
+            if "auth.openai.com" in (page.url or ""):
+                return f"url->auth.openai.com ({page.url})"
+        except Exception:
+            pass
+        try:
+            if page.locator(PHONE_INPUT_SELECTOR).first.is_visible(timeout=300):
+                return "phone-input visible"
+        except Exception:
+            pass
+        try:
+            has_phone_btn = page.evaluate(
+                """(texts) => {
+                    for (const b of document.querySelectorAll('button, [role="button"], a')) {
+                        const t = (b.innerText || b.textContent || '').trim();
+                        if (texts.some(tx => t.includes(tx))) return t;
+                    }
+                    return null;
+                }""",
+                list(PHONE_LOGIN_TEXTS),
+            )
+            if has_phone_btn:
+                return f"phone-button visible: {has_phone_btn!r}"
+        except Exception:
+            pass
+        if _wait_text_on_page(page, SIGNUP_MODAL_TEXTS, timeout_ms=500):
+            return "modal text matched"
+        return None
+
+    modal_ready_reason: str | None = None
     for attempt in range(1, 4):
         if not _click_button_by_text(page, SIGNUP_BUTTON_TEXTS, timeout_ms=8000):
             logger.warning("[phone-reg] 第 %d 次点免费注册失败", attempt)
             _sleep(2)
             continue
-        if _wait_text_on_page(page, SIGNUP_MODAL_TEXTS, timeout_ms=15000):
-            modal_ready = True
+        # 轮询 30s,任一就绪信号命中就过
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            sig = _signup_ready()
+            if sig:
+                modal_ready_reason = sig
+                break
+            time.sleep(0.5)
+        if modal_ready_reason:
+            logger.info("[phone-reg] 注册起始页就绪 (attempt=%d): %s", attempt, modal_ready_reason)
             break
-        logger.warning("[phone-reg] 第 %d 次未见弹窗", attempt)
+        logger.warning("[phone-reg] 第 %d 次未检测到就绪信号 (url=%s)", attempt, page.url)
         _sleep(2)
-    if not modal_ready:
+    if not modal_ready_reason:
         safe_screenshot(page, SCREENSHOT_DIR / "phone_01b_no_modal.png")
-        raise RegisterFailed("点免费注册 3 次后仍未出现「登录或注册」弹窗")
+        # dump 页面诊断信息便于排查
+        try:
+            body_text = page.locator("body").inner_text(timeout=2000) or ""
+            visible_buttons = page.evaluate(
+                """() => {
+                    const out = [];
+                    for (const b of document.querySelectorAll('button, [role="button"], a')) {
+                        const t = (b.innerText || b.textContent || '').trim();
+                        if (!t) continue;
+                        const rect = b.getBoundingClientRect();
+                        if (rect.width <= 0 || rect.height <= 0) continue;
+                        out.push(t.slice(0, 80));
+                        if (out.length >= 30) break;
+                    }
+                    return out;
+                }"""
+            )
+            logger.error("[phone-reg] 页面诊断 url=%s | url_before_click=%s", page.url, url_before_click)
+            logger.error("[phone-reg] 页面诊断 visible_buttons=%s", visible_buttons)
+            logger.error("[phone-reg] 页面诊断 body[:600]=%r", (body_text or "")[:600])
+        except Exception as diag_exc:
+            logger.error("[phone-reg] 页面诊断失败: %s", diag_exc)
+        raise RegisterFailed(
+            "点免费注册 3 次后未检测到注册起始页就绪信号 — "
+            "弹窗文案 / 跳转 / 手机按钮 / 手机输入框均未出现。"
+            "请打开 phone_01b_no_modal.png 看页面实际状态,并把日志里 visible_buttons / body 文本片段贴出来"
+        )
 
     safe_screenshot(page, SCREENSHOT_DIR / "phone_02_modal.png")
     _sleep(1)
