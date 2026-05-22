@@ -467,6 +467,65 @@ def _safe_refund(sms_provider, order, kind: str = "cancel") -> None:
 
 # ─── 表单填写 helpers ───────────────────────────────────────────────────────
 
+def _back_to_phone_input(page: Page, country: PhoneCountry) -> bool:
+    """确保 page 处于手机号输入态。已在 → True 直接返回;
+    不在(通常是 attempt N>1 时停在密码页/SMS code 页) → 尝试点
+    「Edit」链接回手机输入页;失败则 page.goto chatgpt.com 重走 modal。
+
+    返回是否成功恢复。"""
+    # 已经在输入页?
+    try:
+        if page.locator(PHONE_INPUT_SELECTOR).first.is_visible(timeout=1500):
+            return True
+    except Exception:
+        pass
+
+    # 试点「Edit」链接 — phone_05 截图密码页里 Phone number 旁边的 Edit
+    logger.info("[phone-reg] 当前不在手机输入页,尝试点 Edit 回去")
+    edit_clicked = _click_button_by_text(
+        page, ("Edit", "编辑", "修改"), timeout_ms=2500,
+    )
+    if edit_clicked:
+        _sleep(1.5)
+        try:
+            if page.locator(PHONE_INPUT_SELECTOR).first.is_visible(timeout=4000):
+                logger.info("[phone-reg] Edit 命中,已回手机输入页")
+                return True
+        except Exception:
+            pass
+
+    # 重型兜底:重新加载 chatgpt.com 走 modal → phone login
+    logger.info("[phone-reg] Edit 不可用,重新 goto chatgpt.com 走 modal")
+    try:
+        page.goto("https://chatgpt.com", wait_until="domcontentloaded", timeout=60000)
+        _sleep(3)
+        wait_cloudflare(page, max_wait_seconds=60)
+        _sleep(2)
+        # 新版可能直接落登录页,否则点免费注册
+        if not page.locator(PHONE_INPUT_SELECTOR).first.is_visible(timeout=1500):
+            # 优先看到手机登录按钮直接点
+            if _click_button_by_text(page, PHONE_LOGIN_TEXTS, timeout_ms=3000):
+                _sleep(2)
+            else:
+                # 老版 landing — 点免费注册再点手机登录
+                if _click_button_by_text(page, SIGNUP_BUTTON_TEXTS, timeout_ms=5000):
+                    _sleep(3)
+                    _click_button_by_text(page, PHONE_LOGIN_TEXTS, timeout_ms=5000)
+                    _sleep(2)
+        page.locator(PHONE_INPUT_SELECTOR).first.wait_for(state="visible", timeout=10000)
+        # 重新选国家(state 重置了)
+        try:
+            _select_country(page, country)
+            _sleep(1)
+        except Exception:
+            pass
+        logger.info("[phone-reg] goto 兜底成功,回到手机输入页")
+        return True
+    except Exception as exc:
+        logger.warning("[phone-reg] goto 兜底也失败: %s", exc)
+        return False
+
+
 def _fill_phone_input(page: Page, local_number: str, full_number: str, country: PhoneCountry) -> None:
     """填手机号:先看页面国家显示是否对,对就填本地号,不对就填完整号(不带 +)。"""
     inp = page.locator(PHONE_INPUT_SELECTOR).first
@@ -875,6 +934,13 @@ def _phase1_signup(
         local_number = strip_dial_prefix(phone_e164, country)
         logger.info("[phone-reg] attempt=%d order=%d phone=%s local=%s",
                     attempt, order.id, phone_e164, local_number)
+
+        # attempt>1 时 page 可能停在上一轮的密码页/SMS code 页 — 恢复到手机输入态
+        if not _back_to_phone_input(page, country):
+            logger.warning("[phone-reg] page 状态无法恢复到手机输入态 attempt=%d", attempt)
+            _safe_refund(sms_provider, order, "cancel")
+            last_err = RegisterFailed("page 状态恢复失败")
+            continue
 
         try:
             _fill_phone_input(page, local_number, phone_e164, country)
