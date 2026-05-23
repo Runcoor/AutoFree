@@ -531,7 +531,8 @@ def _select_country(page: Page, country: PhoneCountry) -> bool:
             actual_dial = ""
             if verify_text:
                 import re as _re
-                m = _re.search(r"\+(\d+)", verify_text)
+                # 兼容 +55 / +(55) / (+55) 三种写法
+                m = _re.search(r"\+\(?(\d+)", verify_text)
                 if m:
                     actual_dial = m.group(1)
             if not actual_dial:
@@ -540,7 +541,7 @@ def _select_country(page: Page, country: PhoneCountry) -> bool:
                     """() => {
                         const sel = document.querySelector('select');
                         if (sel && sel.options[sel.selectedIndex]) {
-                            const m = sel.options[sel.selectedIndex].text.match(/\\+(\\d+)/);
+                            const m = sel.options[sel.selectedIndex].text.match(/\\+\\(?(\\d+)/);
                             if (m) return m[1];
                         }
                         return '';
@@ -721,12 +722,13 @@ def _fill_phone_input(page: Page, local_number: str, full_number: str, country: 
                 }
             }
             for (const b of candidates) {
-                const m = (b.innerText || '').match(/\\+(\\d+)/);
+                // 兼容 +55 / +(55) / (+55) 三种写法
+                const m = (b.innerText || '').match(/\\+\\(?(\\d+)/);
                 if (m) return m[1];
             }
             const sel = document.querySelector('select');
             if (sel && sel.options[sel.selectedIndex]) {
-                const m = sel.options[sel.selectedIndex].text.match(/\\+(\\d+)/);
+                const m = sel.options[sel.selectedIndex].text.match(/\\+\\(?(\\d+)/);
                 if (m) return m[1];
             }
             return '';
@@ -1251,9 +1253,26 @@ def _phase1_signup(
                 cur_url = (page.url or "").lower()
             except Exception:
                 cur_url = ""
+            # /log-in/password = 已存在账号登录页(不是 signup 创建密码)— 必须 ban 换号
+            # 区分:/create-account/... 是 signup 创建密码;/log-in/password 是登录现有账号
+            on_existing_login = "/log-in/password" in cur_url
             on_about_you = ("about-you" in cur_url) or ("about_you" in cur_url)
             on_main = ("chatgpt.com" in cur_url and "auth.openai.com" not in cur_url
                        and "/auth/" not in cur_url)
+
+            if on_existing_login:
+                logger.warning(
+                    "[phone-reg] 号 %s 被识别为已存在账号(URL=/log-in/password)— ban 换号 attempt=%d",
+                    phone_e164, attempt,
+                )
+                safe_screenshot(page, SCREENSHOT_DIR / f"phone_05c_existing_account_a{attempt}.png")
+                _safe_refund(sms_provider, order, "ban")
+                last_err = RegisterBlocked(
+                    "phone_reg",
+                    f"号 {phone_e164} 已被注册过 (/log-in/password)",
+                    is_phone=True,
+                )
+                continue
 
             if is_pw_page or on_about_you or on_main:
                 logger.info(
@@ -1399,7 +1418,20 @@ def _phase1_signup(
         if last_url == url and not is_pw_page:
             continue
 
-        # 密码页
+        # 密码页 — 但 /log-in/password 是已存在账号登录页,要 ban 换号(不是 signup 创建密码)
+        if "/log-in/password" in url.lower():
+            logger.warning(
+                "[phone-reg] phase1 r%d 主循环命中 /log-in/password — 号 %s 已存在账号,ban 换号",
+                round_idx, phone_e164,
+            )
+            safe_screenshot(page, SCREENSHOT_DIR / f"phone_main_existing_account_r{round_idx}.png")
+            _safe_refund(sms_provider, order, "ban")
+            raise RegisterBlocked(
+                "phone_reg",
+                f"主循环检测到 /log-in/password — 号 {phone_e164} 已被注册过",
+                is_phone=True,
+            )
+
         if is_pw_page:
             diag_counts["pw_hit"] += 1
             logger.info(
