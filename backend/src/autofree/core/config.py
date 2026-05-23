@@ -101,6 +101,8 @@ def get_sms_config() -> dict:
         "service": _ns("service", defaults["service"]),
         "country": _ns("country", defaults["country"]),
         "operator": _ns("operator", defaults["operator"]),
+        # 最大可接受单价 USD,空串/0 = 不限。透传给 provider 的 maxPrice 参数。
+        "max_price": (g.get(f"{provider}.max_price") or g.get("max_price") or "").strip(),
     }
 
 
@@ -116,12 +118,14 @@ def get_sms_provider_config(provider: str) -> dict:
         legacy = g.get(key, "") if p == active else ""
         return (g.get(f"{p}.{key}") or legacy or default).strip() or default
 
+    legacy_mp = g.get("max_price", "") if p == active else ""
     return {
         "provider": p,
         "api_key": (g.get(f"{p}.api_key") or (g.get("api_key", "") if p == active else "") or "").strip(),
         "service": _ns("service", defaults["service"]),
         "country": _ns("country", defaults["country"]),
         "operator": _ns("operator", defaults["operator"]),
+        "max_price": (g.get(f"{p}.max_price") or legacy_mp or "").strip(),
     }
 
 
