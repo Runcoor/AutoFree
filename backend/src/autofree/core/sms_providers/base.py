@@ -30,8 +30,13 @@ class SmsProvider(ABC):
         self.api_key = api_key
 
     @abstractmethod
-    def buy_activation(self, *, country: str, operator: str, product: str) -> SmsOrder:
-        """下单买号。失败 raise SmsBuyFailed。"""
+    def buy_activation(
+        self, *, country: str, operator: str, product: str,
+        max_price: float | None = None,
+    ) -> SmsOrder:
+        """下单买号。失败 raise SmsBuyFailed。
+
+        max_price: 最大可接受单价(USD)。None=不限。各 provider 透传给自己的 maxPrice 参数。"""
 
     @abstractmethod
     def wait_for_otp(

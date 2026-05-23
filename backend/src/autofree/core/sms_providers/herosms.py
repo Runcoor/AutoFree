@@ -254,13 +254,20 @@ class HeroSmsProvider(SmsProvider):
         from autofree.core.sms import SmsError
         raise SmsError(f"[hero-sms] getBalance 异常返回: {text}")
 
-    def buy_activation(self, *, country: str, operator: str, product: str) -> SmsOrder:
+    def buy_activation(
+        self, *, country: str, operator: str, product: str,
+        max_price: float | None = None,
+    ) -> SmsOrder:
         from autofree.core.sms import SmsBuyFailed
         cid = _country_to_id(country)
         svc = _service_to_code(product)
         params: dict = {"service": svc, "country": cid}
         if operator and operator.strip().lower() not in ("", "any"):
             params["operator"] = operator.strip().lower()
+        # max_price=0.028 → 只接 ≤$0.028 的号,贵的拒收(参数名 maxPrice)
+        if max_price is not None and max_price > 0:
+            params["maxPrice"] = f"{max_price:.4f}".rstrip("0").rstrip(".")
+            logger.info("[hero-sms] 限价 maxPrice=$%s", params["maxPrice"])
 
         text = self._api("getNumberV2", params)
 

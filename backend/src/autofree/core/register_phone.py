@@ -512,11 +512,20 @@ def _buy_phone_order(sms_provider, sms_cfg: dict, attempt_idx: int) -> Any:
     country = sms_cfg.get("country") or sms_provider.DEFAULT_COUNTRY
     operator = sms_cfg.get("operator") or sms_provider.DEFAULT_OPERATOR
     service = sms_cfg.get("service") or sms_provider.DEFAULT_SERVICE
+    # max_price 来自设置 — None 或 0 表示不限价
+    max_price_raw = sms_cfg.get("max_price")
+    try:
+        max_price = float(max_price_raw) if max_price_raw not in (None, "", 0) else None
+    except (TypeError, ValueError):
+        max_price = None
     logger.info(
-        "[phone-reg] 买号 attempt=%d provider=%s country=%s operator=%s service=%s",
+        "[phone-reg] 买号 attempt=%d provider=%s country=%s operator=%s service=%s max_price=%s",
         attempt_idx, sms_provider.PROVIDER_NAME, country, operator, service,
+        f"${max_price}" if max_price else "不限",
     )
-    return sms_provider.buy_activation(country=country, operator=operator, product=service)
+    return sms_provider.buy_activation(
+        country=country, operator=operator, product=service, max_price=max_price,
+    )
 
 
 def _safe_refund(sms_provider, order, kind: str = "cancel") -> None:
@@ -1107,65 +1116,30 @@ def _phase1_signup(
             _sleep(1)
 
         if not sms_visible:
-            # OpenAI 新流程:提交手机号后直接落「Enter your password」页 —
-            #   - 号被识别为已存在账号(SMS 不发) → 页面无「Sign up」链接 → 这号没用,ban
-            #   - 号是新号但默认走 login UI → 页面有「Don't have an account? Sign up」链接 →
-            #     点链接切到 signup 流程,再次等 SMS code
+            # SMS code 框 15s 未出现 — 检测页面是否已跳到「创建密码」/ about-you / 主页等
+            # 后续步骤(用户描述的真实流程:填手机号 → 提交 → 创建密码页 → ... → SMS 验证)
             try:
                 is_pw_page = page.locator(PASSWORD_INPUT_SELECTOR).first.is_visible(timeout=2000)
             except Exception:
                 is_pw_page = False
+            try:
+                cur_url = (page.url or "").lower()
+            except Exception:
+                cur_url = ""
+            on_about_you = ("about-you" in cur_url) or ("about_you" in cur_url)
+            on_main = ("chatgpt.com" in cur_url and "auth.openai.com" not in cur_url
+                       and "/auth/" not in cur_url)
 
-            if is_pw_page:
-                safe_screenshot(page, SCREENSHOT_DIR / f"phone_05b_password_page_a{attempt}.png")
-                # 找底部 Sign up 链接 — 命中说明这号可能是新号,OpenAI 默认 login UI 提供了切到 signup 的入口
-                signup_clicked = _click_button_by_text(page, SIGN_UP_LINK_TEXTS, timeout_ms=2500)
-                if signup_clicked:
-                    logger.info(
-                        "[phone-reg] 密码页底部「Sign up」链接命中,切到 signup attempt=%d", attempt,
-                    )
-                    _sleep(3)
-                    wait_cloudflare(page, max_wait_seconds=30)
-                    _sleep(2)
-                    # 重新等 SMS code 输入框
-                    for _ in range(15):
-                        try:
-                            for sel in CODE_INPUT_SELECTORS:
-                                if page.locator(sel).first.is_visible(timeout=600):
-                                    sms_visible = True
-                                    break
-                            if sms_visible:
-                                break
-                        except Exception:
-                            pass
-                        _sleep(1)
-                    if sms_visible:
-                        logger.info("[phone-reg] 点 Sign up 后 SMS code 框出现,继续 attempt=%d", attempt)
-                    else:
-                        logger.warning(
-                            "[phone-reg] 点 Sign up 后仍未见 SMS code 框 attempt=%d — 号可能仍被拒",
-                            attempt,
-                        )
-                        safe_screenshot(page, SCREENSHOT_DIR / f"phone_06_no_code_after_signup_a{attempt}.png")
-                        _safe_refund(sms_provider, order, "ban")
-                        last_err = RegisterBlocked("phone_reg",
-                                                   "切到 signup 后仍未见 SMS 输入框", is_phone=True)
-                        continue
-                else:
-                    # 没找到 Sign up 链接 → 号被识别为已存在账号(可能是 SMS provider 给的二手号)
-                    logger.warning(
-                        "[phone-reg] 密码页无「Sign up」链接 — 号 %s 被 OpenAI 识别为已存在账号,ban 换号 attempt=%d",
-                        phone_e164, attempt,
-                    )
-                    _safe_refund(sms_provider, order, "ban")
-                    last_err = RegisterBlocked(
-                        "phone_reg",
-                        f"号 {phone_e164} 被识别为已存在账号(二手号?),无 Sign up 链接",
-                        is_phone=True,
-                    )
-                    continue
+            if is_pw_page or on_about_you or on_main:
+                logger.info(
+                    "[phone-reg] SMS 框未出现但已进入后续步骤(pw=%s about-you=%s main=%s)"
+                    " — break 让主循环接管 attempt=%d url=%s",
+                    is_pw_page, on_about_you, on_main, attempt, cur_url[:80],
+                )
+                safe_screenshot(page, SCREENSHOT_DIR / f"phone_05b_skipped_sms_a{attempt}.png")
+                break  # 跳出 SMS retry 循环,进 phase1 主循环
             else:
-                logger.warning("[phone-reg] 提交手机号后 15s 未见 code 框也未见密码页 — 号可能被拒")
+                logger.warning("[phone-reg] 提交手机号后 15s 未见 code 框也未见后续页 — 号可能被拒")
                 safe_screenshot(page, SCREENSHOT_DIR / f"phone_06_no_code_input_a{attempt}.png")
                 _safe_refund(sms_provider, order, "ban")
                 last_err = RegisterBlocked("phone_reg",
@@ -1324,6 +1298,41 @@ def _phase1_signup(
             )
             _fill_about_you(page, full_name, birth)
             _sleep(5)
+            wait_cloudflare(page, max_wait_seconds=60)
+            _sleep(2)
+            last_url = url
+            continue
+
+        # SMS code 输入页(密码 / about-you 之后才触发的 SMS 验证场景)
+        is_sms_page = ("contact-verification" in url or "phone-verification" in url
+                       or "verify" in url) or any(
+            (i.get("type") in ("text", "tel", "number") and i.get("name") != "phoneNumberInput"
+             and ("code" in (i.get("name") or "").lower()
+                  or "code" in (i.get("placeholder") or "").lower()
+                  or any(s in (i.get("placeholder") or "").lower()
+                         for s in ("verification", "验证"))))
+            for i in inputs_info
+        )
+        if is_sms_page:
+            logger.info("[phone-reg] phase1 r%d 命中 SMS 验证页,等 SMS#1 order=%d",
+                        round_idx, order.id)
+            try:
+                code = sms_provider.wait_for_otp(
+                    order_id=order.id, timeout=SMS_WAIT_SECONDS,
+                    should_stop=is_stop_requested,
+                )
+            except sms_mod.SmsAborted:
+                raise BatchStopped("phone reg phase1 SMS 等待时收到 stop")
+            except sms_mod.SmsTimeout as exc:
+                logger.warning("[phone-reg] phase1 r%d SMS 超时 %ds — 死号 ban", round_idx, SMS_WAIT_SECONDS)
+                _safe_refund(sms_provider, order, "ban")
+                raise RegisterBlocked("phone_reg", f"SMS#1 超时: {exc}", is_phone=True) from exc
+
+            if not _fill_sms_code_smart(page, code):
+                safe_screenshot(page, SCREENSHOT_DIR / f"phone_07_main_sms_fill_failed_r{round_idx}.png")
+                raise RegisterBlocked("phone_reg", "主循环 SMS code 填写失败", is_phone=True)
+            _click_submit_button(page)
+            _sleep(4)
             wait_cloudflare(page, max_wait_seconds=60)
             _sleep(2)
             last_url = url

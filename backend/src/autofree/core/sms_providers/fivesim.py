@@ -56,13 +56,19 @@ class FiveSimProvider(SmsProvider):
             "raw": data,
         }
 
-    def buy_activation(self, *, country: str, operator: str, product: str) -> SmsOrder:
+    def buy_activation(
+        self, *, country: str, operator: str, product: str,
+        max_price: float | None = None,
+    ) -> SmsOrder:
         from autofree.core.sms import SmsBuyFailed
         country = (country or self.DEFAULT_COUNTRY).strip().lower() or self.DEFAULT_COUNTRY
         operator = (operator or self.DEFAULT_OPERATOR).strip().lower() or self.DEFAULT_OPERATOR
         product = (product or self.DEFAULT_SERVICE).strip().lower() or self.DEFAULT_SERVICE
         url = f"{BASE_URL}/user/buy/activation/{country}/{operator}/{product}"
-        resp = requests.get(url, headers=self._headers(), timeout=DEFAULT_TIMEOUT)
+        params: dict | None = None
+        if max_price is not None and max_price > 0:
+            params = {"maxPrice": f"{max_price:.4f}".rstrip("0").rstrip(".")}
+        resp = requests.get(url, headers=self._headers(), params=params, timeout=DEFAULT_TIMEOUT)
         if resp.status_code != 200:
             raise SmsBuyFailed(
                 f"[5sim] buy HTTP {resp.status_code} country={country} operator={operator} "

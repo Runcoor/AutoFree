@@ -345,6 +345,7 @@ const SMS_PROVIDER_META: Record<string, {
   label: string
   countryHint: string
   operatorHint: string
+  maxPriceHint: string
   countryDefault: string
   operatorDefault: string
   docsUrl?: string
@@ -353,6 +354,7 @@ const SMS_PROVIDER_META: Record<string, {
     label: '5sim',
     countryHint: 'slug,如 france / indonesia / malaysia / thailand',
     operatorHint: 'any / virtual51 / orange / xl 等(具体见 5sim Statistics)',
+    maxPriceHint: '最大可接受单价 USD,如 0.030;留空=不限。透传给 5sim maxPrice 参数',
     countryDefault: 'france',
     operatorDefault: 'any',
     docsUrl: 'https://5sim.net/products/openai',
@@ -361,6 +363,7 @@ const SMS_PROVIDER_META: Record<string, {
     label: 'hero-sms',
     countryHint: '英文名,如 england / france / usa(内部翻译为数字 ID)',
     operatorHint: 'any / 留空(hero-sms 默认任意运营商)',
+    maxPriceHint: '最大可接受单价 USD,如 0.030;留空=不限。透传给 hero-sms maxPrice 参数',
     countryDefault: 'england',
     operatorDefault: 'any',
     docsUrl: 'https://hero-sms.com/cn/api',
@@ -444,7 +447,7 @@ function SmsProviderForm({
 }: {
   provider: string
   isActive: boolean
-  block: { api_key_masked: string; has_api_key: boolean; service: string; country: string; operator: string } | undefined
+  block: { api_key_masked: string; has_api_key: boolean; service: string; country: string; operator: string; max_price?: string } | undefined
   onSaved: (cfg: SmsCfg) => void
 }) {
   const meta = SMS_PROVIDER_META[provider]
@@ -452,6 +455,7 @@ function SmsProviderForm({
   const [service, setService] = useState('openai')
   const [country, setCountry] = useState(meta.countryDefault)
   const [operator, setOperator] = useState(meta.operatorDefault)
+  const [maxPrice, setMaxPrice] = useState('')
   const [busy, setBusy] = useState(false)
   const [balance, setBalance] = useState('—')
   const [balanceBusy, setBalanceBusy] = useState(false)
@@ -463,13 +467,14 @@ function SmsProviderForm({
       setService(block.service || 'openai')
       setCountry(block.country || meta.countryDefault)
       setOperator(block.operator || meta.operatorDefault)
+      setMaxPrice(block.max_price || '')
     }
   }, [block, meta])
 
   async function save(setActiveAfter = false) {
     setBusy(true)
     try {
-      const body: any = { provider, service, country, operator }
+      const body: any = { provider, service, country, operator, max_price: maxPrice }
       if (apiKey) body.api_key = apiKey
       if (setActiveAfter) body.set_active = true
       const r = await settingsApi.putSms(body)
@@ -552,6 +557,13 @@ function SmsProviderForm({
           value={operator}
           onChange={(e) => setOperator(e.target.value)}
           hint={meta.operatorHint}
+        />
+        <Input
+          label="Max Price (USD)"
+          value={maxPrice}
+          onChange={(e) => setMaxPrice(e.target.value)}
+          hint={meta.maxPriceHint}
+          placeholder="留空=不限,如 0.030"
         />
         <div className="field md:col-span-2">
           <label>当前余额</label>

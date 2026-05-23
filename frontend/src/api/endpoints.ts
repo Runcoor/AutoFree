@@ -14,6 +14,7 @@ export interface CloudMailCfg { base_url: string; password_masked: string; has_p
 export interface SmsProviderBlock {
   api_key_masked: string; has_api_key: boolean
   service: string; country: string; operator: string
+  max_price?: string  // 最大单价 USD,留空=不限
 }
 export interface SmsCfg {
   active: string  // '5sim' | 'hero-sms'
@@ -60,6 +61,7 @@ export const settingsApi = {
   putSms: (body: {
     provider: string  // '5sim' | 'hero-sms' — 必传,决定写入哪个 namespace
     api_key?: string; service?: string; country?: string; operator?: string
+    max_price?: string  // 最大单价 USD,留空=不限
     set_active?: boolean
   }) => api.put<SmsCfg>('/settings/sms', body).then(r => r.data),
   setSmsActive: (provider: string) =>

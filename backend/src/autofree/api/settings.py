@@ -88,6 +88,8 @@ class SmsParams(BaseModel):
     service: Optional[str] = None
     country: Optional[str] = None
     operator: Optional[str] = None
+    # 最大可接受单价 USD,空串/None/0 = 不限。透传给 provider 的 maxPrice 参数。
+    max_price: Optional[str] = None
     set_active: Optional[bool] = None  # True = 同时把这个 provider 设为 active
 
 
@@ -102,6 +104,7 @@ def _sms_provider_block(cfg: dict) -> dict:
         "service": cfg.get("service", "openai"),
         "country": cfg.get("country", ""),
         "operator": cfg.get("operator", ""),
+        "max_price": str(cfg.get("max_price", "") or ""),
     }
 
 

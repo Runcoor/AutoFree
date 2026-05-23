@@ -809,9 +809,15 @@ def _solve_phone_gate(page) -> bool:
     country = cfg.get("country") or provider.DEFAULT_COUNTRY
     operator = cfg.get("operator") or provider.DEFAULT_OPERATOR
     service = cfg.get("service") or provider.DEFAULT_SERVICE
+    _mp_raw = cfg.get("max_price")
+    try:
+        max_price = float(_mp_raw) if _mp_raw not in (None, "", 0) else None
+    except (TypeError, ValueError):
+        max_price = None
     logger.info(
-        "[oauth] SMS provider=%s 实际使用配置 country=%s operator=%s service=%s",
+        "[oauth] SMS provider=%s 实际使用配置 country=%s operator=%s service=%s max_price=%s",
         provider.PROVIDER_NAME, country, operator, service,
+        f"${max_price}" if max_price else "不限",
     )
 
     # === 关键:先确认 input 存在,再花钱买号 ===
@@ -860,7 +866,9 @@ def _solve_phone_gate(page) -> bool:
                 last_err = RegisterBlocked("oauth_phone_gate", "重试时 phone input 已消失", is_phone=True)
                 break
 
-            order = provider.buy_activation(country=country, operator=operator, product=service)
+            order = provider.buy_activation(
+                country=country, operator=operator, product=service, max_price=max_price,
+            )
             if order.id in used_order_ids:
                 logger.warning("[oauth] %s 给了重复号 id=%d phone=%s,跳过",
                                provider.PROVIDER_NAME, order.id, order.phone)
