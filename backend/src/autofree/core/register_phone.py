@@ -75,6 +75,14 @@ SIGNUP_MODAL_TEXTS = (
     "Continue with email", "继续使用邮箱",
 )
 PHONE_LOGIN_TEXTS = ("继续使用手机登录", "手机登录", "Continue with phone", "Use phone")
+# 中间过渡按钮 — chatgpt.com 新流程:点免费注册后先出现这个按钮,需要先点它才能
+# 看到「继续使用手机登录」入口。
+INTERMEDIATE_LOGIN_TEXTS = (
+    "Log in or sign up to create",
+    "登录或注册以创建",
+    "Log in or sign up",
+    "登录或注册",
+)
 SUBMIT_BUTTON_TEXTS = ("继续", "Continue", "Next", "下一步")
 FINISH_BUTTON_TEXTS = ("完成", "Finish", "Done", "Submit")
 RETRY_BUTTON_TEXTS = ("重试", "Retry", "Try again")
@@ -319,35 +327,76 @@ def _select_country(page: Page, country: PhoneCountry) -> bool:
     dial = country.dial_code
     name = country.cn_name
 
-    # 已经显示正确国家? — 严格判定:只看触发器(visible + aria-haspopup=listbox 或
-    # select 的当前 selectedIndex),不扫所有 button(避免误判隐藏 listbox 选项)
-    already = page.evaluate(
+    # 找触发器按钮 — 多种候选,从严到松,绝不扫 listbox 内的选项
+    def _find_trigger_text() -> str | None:
+        return page.evaluate(
+            """() => {
+                // 候选触发器:必须可见、不在 listbox role 容器内
+                const isHidden = (el) => {
+                    const r = el.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0) return true;
+                    const cs = getComputedStyle(el);
+                    if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0')
+                        return true;
+                    return false;
+                };
+                const inListbox = (el) => {
+                    let p = el.parentElement;
+                    while (p && p !== document.body) {
+                        if (p.getAttribute && p.getAttribute('role') === 'listbox') return true;
+                        p = p.parentElement;
+                    }
+                    return false;
+                };
+                const candidates = [];
+                // 候选 1: aria-haspopup=listbox
+                for (const b of document.querySelectorAll('button[aria-haspopup="listbox"]')) {
+                    if (!isHidden(b) && !inListbox(b)) candidates.push(b);
+                }
+                // 候选 2: role=combobox
+                for (const b of document.querySelectorAll('[role="combobox"]')) {
+                    if (!isHidden(b) && !inListbox(b)) candidates.push(b);
+                }
+                // 候选 3: 兜底 — 任何可见 button 文本末尾匹配 "(+XX)" 模式(国家选择器特征)
+                for (const b of document.querySelectorAll('button')) {
+                    if (!isHidden(b) || inListbox(b)) continue;
+                    const t = (b.innerText || '').trim();
+                    // 严格匹配: 末尾或括号内含 +XX (1-4 位数字),且整体文本长度 < 60 (避免大段文字)
+                    if (t.length < 60 && (/\\(\\+?\\d{1,4}\\)/.test(t) || /\\+\\d{1,4}\\s*$/.test(t))) {
+                        candidates.push(b);
+                    }
+                }
+                if (candidates.length === 0) return null;
+                return (candidates[0].innerText || '').trim();
+            }"""
+        )
+
+    trigger_text = _find_trigger_text()
+    logger.info("[phone-reg] 触发器文本: %r (目标 iso=%s dial=+%s)", trigger_text, iso, dial)
+
+    # 已经显示正确国家? — 看 trigger 文本或 select.options[selectedIndex] 是否含 +{dial}
+    if trigger_text:
+        import re as _re
+        if _re.search(rf"(^|[^0-9])\+{dial}([^0-9]|$)", trigger_text) or f"({dial})" in trigger_text:
+            logger.info("[phone-reg] 国家已是 %s", trigger_text)
+            return True
+    # 退路:原生 select 的当前选中项
+    sel_already = page.evaluate(
         """(args) => {
             const { iso, dial } = args;
-            // 优先看 React Aria 触发器按钮
-            for (const b of document.querySelectorAll('button[aria-haspopup="listbox"]')) {
-                const r = b.getBoundingClientRect();
-                if (r.width <= 0 || r.height <= 0) continue;
-                const t = (b.innerText || '').trim();
-                // 必须 包含 +{dial}(完整 token) 或 ({dial})
-                const re = new RegExp(`(^|[^0-9])\\\\+${dial}([^0-9]|$)`);
-                if (re.test(t) || t.includes(`(${dial})`)) return `trigger:${t}`;
-            }
-            // 退路:原生 select 的当前选中项
             const sel = document.querySelector('select');
-            if (sel) {
-                const opt = sel.options[sel.selectedIndex];
-                if (!opt) return null;
-                if (opt.value === iso) return `select:${opt.text}`;
-                const re = new RegExp(`(^|[^0-9])\\\\+${dial}([^0-9]|$)`);
-                if (re.test(opt.text) || opt.text.includes(`(${dial})`)) return `select:${opt.text}`;
-            }
+            if (!sel) return null;
+            const opt = sel.options[sel.selectedIndex];
+            if (!opt) return null;
+            if (opt.value === iso) return opt.text;
+            const re = new RegExp(`(^|[^0-9])\\\\+${dial}([^0-9]|$)`);
+            if (re.test(opt.text) || opt.text.includes(`(${dial})`)) return opt.text;
             return null;
         }""",
         {"iso": iso, "dial": dial},
     )
-    if already:
-        logger.info("[phone-reg] 国家已是 %s", already)
+    if sel_already:
+        logger.info("[phone-reg] 国家已是 select:%s", sel_already)
         return True
 
     # 检测 UI 类型
@@ -477,28 +526,54 @@ def _select_country(page: Page, country: PhoneCountry) -> bool:
         if ok:
             logger.info("[phone-reg] 原生 select 选择: %s,校验中...", ok)
             _sleep(0.8)
-            # 校验:再读 trigger 显示的 dial 是否对
-            actual_dial = page.evaluate(
-                """() => {
-                    for (const b of document.querySelectorAll('button[aria-haspopup="listbox"]')) {
-                        const r = b.getBoundingClientRect();
-                        if (r.width <= 0 || r.height <= 0) continue;
-                        const m = (b.innerText || '').match(/\\+(\\d+)/);
-                        if (m) return m[1];
-                    }
-                    const sel = document.querySelector('select');
-                    if (sel && sel.options[sel.selectedIndex]) {
-                        const m = sel.options[sel.selectedIndex].text.match(/\\+(\\d+)/);
-                        if (m) return m[1];
-                    }
-                    return '';
-                }"""
-            )
+            # 校验:用同样宽松的 trigger 检测重读
+            verify_text = _find_trigger_text()
+            actual_dial = ""
+            if verify_text:
+                import re as _re
+                m = _re.search(r"\+(\d+)", verify_text)
+                if m:
+                    actual_dial = m.group(1)
+            if not actual_dial:
+                # 兜底:select
+                actual_dial = page.evaluate(
+                    """() => {
+                        const sel = document.querySelector('select');
+                        if (sel && sel.options[sel.selectedIndex]) {
+                            const m = sel.options[sel.selectedIndex].text.match(/\\+(\\d+)/);
+                            if (m) return m[1];
+                        }
+                        return '';
+                    }"""
+                ) or ""
             if str(actual_dial) == dial:
                 logger.info("[phone-reg] 国家校验通过 dial=+%s", actual_dial)
                 return True
-            logger.warning("[phone-reg] 国家校验失败:期望 +%s 实际 +%s — 用完整号兜底",
-                           dial, actual_dial or "?")
+            logger.warning(
+                "[phone-reg] 国家校验失败:期望 +%s 实际 +%s trigger=%r — dump 页面 button",
+                dial, actual_dial or "?", verify_text,
+            )
+            # 失败时 dump 全部 visible button 文本,排查 chatgpt.com 改版
+            try:
+                btns = page.evaluate(
+                    """() => {
+                        const out = [];
+                        for (const b of document.querySelectorAll('button, [role="combobox"], [role="button"]')) {
+                            const r = b.getBoundingClientRect();
+                            if (r.width <= 0 || r.height <= 0) continue;
+                            const t = (b.innerText || '').trim();
+                            if (!t || t.length > 100) continue;
+                            const attrs = {};
+                            for (const a of b.attributes) attrs[a.name] = a.value;
+                            out.push({ text: t, attrs });
+                            if (out.length >= 30) break;
+                        }
+                        return out;
+                    }"""
+                )
+                logger.error("[phone-reg] 国家失败诊断 visible_buttons=%s", btns)
+            except Exception:
+                pass
             return False
 
     logger.warning("[phone-reg] 国家选择全部方法失败,流程将用完整号码兜底")
@@ -584,10 +659,14 @@ def _back_to_phone_input(page: Page, country: PhoneCountry) -> bool:
             if _click_button_by_text(page, PHONE_LOGIN_TEXTS, timeout_ms=3000):
                 _sleep(2)
             else:
-                # 老版 landing — 点免费注册再点手机登录
+                # 老版 landing — 点免费注册再点手机登录(中间可能有过渡按钮)
                 if _click_button_by_text(page, SIGNUP_BUTTON_TEXTS, timeout_ms=5000):
                     _sleep(3)
-                    _click_button_by_text(page, PHONE_LOGIN_TEXTS, timeout_ms=5000)
+                    # 可能出现「Log in or sign up to create」中间按钮
+                    if not _click_button_by_text(page, PHONE_LOGIN_TEXTS, timeout_ms=2500):
+                        if _click_button_by_text(page, INTERMEDIATE_LOGIN_TEXTS, timeout_ms=2500):
+                            _sleep(2)
+                            _click_button_by_text(page, PHONE_LOGIN_TEXTS, timeout_ms=5000)
                     _sleep(2)
         page.locator(PHONE_INPUT_SELECTOR).first.wait_for(state="visible", timeout=10000)
         # 重新选国家(state 重置了)
@@ -609,13 +688,39 @@ def _fill_phone_input(page: Page, local_number: str, full_number: str, country: 
     inp.wait_for(state="visible", timeout=15000)
     inp.click(click_count=3)
 
-    # 只读触发器(可见 + aria-haspopup=listbox / 原生 select 的 selectedOption),
-    # 避免扫到隐藏 listbox 选项里的其他 +XX
+    # 找触发器读 current_dial — 宽松匹配:aria-haspopup / role=combobox / 含 (+XX)
+    # 文本的可见 button,且不在 listbox 容器内(避免读到隐藏选项)
     current_dial = page.evaluate(
         """() => {
+            const isHidden = (el) => {
+                const r = el.getBoundingClientRect();
+                if (r.width <= 0 || r.height <= 0) return true;
+                const cs = getComputedStyle(el);
+                return cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0';
+            };
+            const inListbox = (el) => {
+                let p = el.parentElement;
+                while (p && p !== document.body) {
+                    if (p.getAttribute && p.getAttribute('role') === 'listbox') return true;
+                    p = p.parentElement;
+                }
+                return false;
+            };
+            const candidates = [];
             for (const b of document.querySelectorAll('button[aria-haspopup="listbox"]')) {
-                const r = b.getBoundingClientRect();
-                if (r.width <= 0 || r.height <= 0) continue;
+                if (!isHidden(b) && !inListbox(b)) candidates.push(b);
+            }
+            for (const b of document.querySelectorAll('[role="combobox"]')) {
+                if (!isHidden(b) && !inListbox(b)) candidates.push(b);
+            }
+            for (const b of document.querySelectorAll('button')) {
+                if (isHidden(b) || inListbox(b)) continue;
+                const t = (b.innerText || '').trim();
+                if (t.length < 60 && (/\\(\\+?\\d{1,4}\\)/.test(t) || /\\+\\d{1,4}\\s*$/.test(t))) {
+                    candidates.push(b);
+                }
+            }
+            for (const b of candidates) {
                 const m = (b.innerText || '').match(/\\+(\\d+)/);
                 if (m) return m[1];
             }
@@ -974,10 +1079,30 @@ def _phase1_signup(
     safe_screenshot(page, SCREENSHOT_DIR / "phone_02_modal.png")
     _sleep(1)
 
-    # 2) 点手机登录 — 中英文双语
-    if not _click_button_by_text(page, PHONE_LOGIN_TEXTS, timeout_ms=10000):
-        safe_screenshot(page, SCREENSHOT_DIR / "phone_02a_no_phone_login.png")
-        raise RegisterFailed(f"找不到「{'/'.join(PHONE_LOGIN_TEXTS)}」按钮")
+    # 2) 点手机登录 — 中英文双语。新流程可能先要点「Log in or sign up to create」中间按钮,
+    # 再才能看到「继续使用手机登录」入口,所以先 short-timeout 试一次,失败再走中间按钮兜底。
+    if not _click_button_by_text(page, PHONE_LOGIN_TEXTS, timeout_ms=3000):
+        # 兜底:看下是不是停在「Log in or sign up to create」中间页 — 点它再试
+        if _click_button_by_text(page, INTERMEDIATE_LOGIN_TEXTS, timeout_ms=3000):
+            logger.info("[phone-reg] 命中中间过渡按钮(Log in or sign up to create),继续找手机登录")
+            _sleep(2)
+            wait_cloudflare(page, max_wait_seconds=15)
+            _sleep(1)
+        if not _click_button_by_text(page, PHONE_LOGIN_TEXTS, timeout_ms=10000):
+            safe_screenshot(page, SCREENSHOT_DIR / "phone_02a_no_phone_login.png")
+            # dump 页面可见按钮诊断
+            try:
+                btns = page.evaluate(
+                    """() => Array.from(document.querySelectorAll('button, [role="button"], a'))
+                        .filter(b => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+                        .map(b => (b.innerText || b.textContent || '').trim())
+                        .filter(t => t && t.length < 80).slice(0, 30)"""
+                )
+                logger.error("[phone-reg] 找不到手机登录按钮,页面 visible_buttons=%s url=%s",
+                             btns, page.url)
+            except Exception:
+                pass
+            raise RegisterFailed(f"找不到「{'/'.join(PHONE_LOGIN_TEXTS)}」按钮")
 
     # 3) 等手机号输入框
     try:
