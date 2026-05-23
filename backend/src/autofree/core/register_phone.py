@@ -89,6 +89,13 @@ PHONE_CONFLICT_PATTERNS = (
     "already have an account",
 )
 
+# Phone 格式/无效文案 — 国家选错或号码格式不合法导致前端阻塞提交
+PHONE_INVALID_PATTERNS = (
+    "Phone number is not valid", "not a valid phone",
+    "电话号码无效", "手机号码无效", "号码无效", "格式不正确", "无效的电话",
+    "请输入有效的", "Invalid phone number",
+)
+
 # 选择器
 PHONE_INPUT_SELECTOR = 'input[name="phoneNumberInput"], input[type="tel"]'
 PASSWORD_INPUT_SELECTOR = 'input[type="password"]'
@@ -258,6 +265,26 @@ def _detect_phone_conflict(page: Page) -> str | None:
     return None
 
 
+def _detect_phone_invalid(page: Page) -> str | None:
+    """检测页面是否有「号码无效 / Phone number is not valid」类前端校验阻塞文案。
+
+    出现这个文案通常意味着:国家代码选错 / 号码长度不对 / OpenAI 拒收该号段。
+    SMS 不会被触发,需要立即换号(或换国家)。"""
+    try:
+        body = page.locator("body").inner_text(timeout=1500) or ""
+    except Exception:
+        return None
+    low = body.lower()
+    for pat in PHONE_INVALID_PATTERNS:
+        if pat in body or pat.lower() in low:
+            for line in body.split("\n"):
+                line_strip = line.strip()
+                if pat in line_strip or pat.lower() in line_strip.lower():
+                    return line_strip[:200]
+            return pat
+    return None
+
+
 def _detect_oauth_error(page: Page) -> str | None:
     """auth.openai.com 出错页(no_valid_organizations / something went wrong)。"""
     try:
@@ -288,21 +315,32 @@ def _select_country(page: Page, country: PhoneCountry) -> bool:
     dial = country.dial_code
     name = country.cn_name
 
-    # 已经显示正确国家?
+    # 已经显示正确国家? — 严格判定:只看触发器(visible + aria-haspopup=listbox 或
+    # select 的当前 selectedIndex),不扫所有 button(避免误判隐藏 listbox 选项)
     already = page.evaluate(
-        """(dial) => {
-            for (const b of document.querySelectorAll('button')) {
+        """(args) => {
+            const { iso, dial } = args;
+            // 优先看 React Aria 触发器按钮
+            for (const b of document.querySelectorAll('button[aria-haspopup="listbox"]')) {
+                const r = b.getBoundingClientRect();
+                if (r.width <= 0 || r.height <= 0) continue;
                 const t = (b.innerText || '').trim();
-                if (t.includes(`+${dial}`) || t.includes(`(${dial})`)) return t;
+                // 必须 包含 +{dial}(完整 token) 或 ({dial})
+                const re = new RegExp(`(^|[^0-9])\\\\+${dial}([^0-9]|$)`);
+                if (re.test(t) || t.includes(`(${dial})`)) return `trigger:${t}`;
             }
+            // 退路:原生 select 的当前选中项
             const sel = document.querySelector('select');
             if (sel) {
                 const opt = sel.options[sel.selectedIndex];
-                if (opt && (opt.text.includes(`(${dial})`) || opt.text.includes(`+${dial}`))) return opt.text;
+                if (!opt) return null;
+                if (opt.value === iso) return `select:${opt.text}`;
+                const re = new RegExp(`(^|[^0-9])\\\\+${dial}([^0-9]|$)`);
+                if (re.test(opt.text) || opt.text.includes(`(${dial})`)) return `select:${opt.text}`;
             }
             return null;
         }""",
-        dial,
+        {"iso": iso, "dial": dial},
     )
     if already:
         logger.info("[phone-reg] 国家已是 %s", already)
@@ -409,6 +447,7 @@ def _select_country(page: Page, country: PhoneCountry) -> bool:
                 logger.warning("[phone-reg] React Aria 滚动点击异常: %s", exc)
 
     # ── 原生 <select>(chatgpt.com 注册弹窗常见)──
+    # 关键: 必须用 nativeSetter,直接 sel.value=X 不会触发 React 受控组件的 onChange
     if ui_type in ("native", "unknown"):
         ok = page.evaluate(
             """(args) => {
@@ -422,16 +461,41 @@ def _select_country(page: Page, country: PhoneCountry) -> bool:
                     if (name && opt.text.includes(name)) { target = opt; break; }
                 }
                 if (!target) return null;
-                sel.value = target.value;
+                // 用 nativeSetter 触发 React 受控组件更新
+                const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+                setter.call(sel, target.value);
+                sel.dispatchEvent(new Event('input', { bubbles: true }));
                 sel.dispatchEvent(new Event('change', { bubbles: true }));
                 return target.text;
             }""",
             {"iso": iso, "dial": dial, "name": name},
         )
         if ok:
-            logger.info("[phone-reg] 原生 select 选择成功: %s", ok)
+            logger.info("[phone-reg] 原生 select 选择: %s,校验中...", ok)
             _sleep(0.8)
-            return True
+            # 校验:再读 trigger 显示的 dial 是否对
+            actual_dial = page.evaluate(
+                """() => {
+                    for (const b of document.querySelectorAll('button[aria-haspopup="listbox"]')) {
+                        const r = b.getBoundingClientRect();
+                        if (r.width <= 0 || r.height <= 0) continue;
+                        const m = (b.innerText || '').match(/\\+(\\d+)/);
+                        if (m) return m[1];
+                    }
+                    const sel = document.querySelector('select');
+                    if (sel && sel.options[sel.selectedIndex]) {
+                        const m = sel.options[sel.selectedIndex].text.match(/\\+(\\d+)/);
+                        if (m) return m[1];
+                    }
+                    return '';
+                }"""
+            )
+            if str(actual_dial) == dial:
+                logger.info("[phone-reg] 国家校验通过 dial=+%s", actual_dial)
+                return True
+            logger.warning("[phone-reg] 国家校验失败:期望 +%s 实际 +%s — 用完整号兜底",
+                           dial, actual_dial or "?")
+            return False
 
     logger.warning("[phone-reg] 国家选择全部方法失败,流程将用完整号码兜底")
     return False
@@ -532,11 +596,19 @@ def _fill_phone_input(page: Page, local_number: str, full_number: str, country: 
     inp.wait_for(state="visible", timeout=15000)
     inp.click(click_count=3)
 
+    # 只读触发器(可见 + aria-haspopup=listbox / 原生 select 的 selectedOption),
+    # 避免扫到隐藏 listbox 选项里的其他 +XX
     current_dial = page.evaluate(
         """() => {
-            for (const b of document.querySelectorAll('button, select')) {
-                const t = b.textContent || b.innerText || '';
-                const m = t.match(/\\+(\\d+)/);
+            for (const b of document.querySelectorAll('button[aria-haspopup="listbox"]')) {
+                const r = b.getBoundingClientRect();
+                if (r.width <= 0 || r.height <= 0) continue;
+                const m = (b.innerText || '').match(/\\+(\\d+)/);
+                if (m) return m[1];
+            }
+            const sel = document.querySelector('select');
+            if (sel && sel.options[sel.selectedIndex]) {
+                const m = sel.options[sel.selectedIndex].text.match(/\\+(\\d+)/);
                 if (m) return m[1];
             }
             return '';
@@ -978,6 +1050,40 @@ def _phase1_signup(
             _safe_refund(sms_provider, order, "ban")
             last_err = RegisterBlocked("phone_reg",
                                        f"号 {phone_e164} 提交后被拒: {conflict}", is_phone=True)
+            continue
+
+        # 检测「号码无效」前端校验文案 — 通常是国家代码选错(_select_country 失败) +
+        # _fill_phone_input 兜底也没生效。SMS 永远不会到,立即 ban 退款换号。
+        invalid_msg = _detect_phone_invalid(page)
+        if invalid_msg:
+            safe_screenshot(page, SCREENSHOT_DIR / f"phone_04c_invalid_a{attempt}.png")
+            logger.warning("[phone-reg] 提交后号码无效 attempt=%d: %s (phone=%s country=+%s)",
+                           attempt, invalid_msg, phone_e164, country.dial_code)
+            # 诊断:dump 当前国家显示 + 输入框值
+            try:
+                diag = page.evaluate(
+                    """() => {
+                        let triggerText = '';
+                        for (const b of document.querySelectorAll('button[aria-haspopup="listbox"]')) {
+                            const r = b.getBoundingClientRect();
+                            if (r.width <= 0 || r.height <= 0) continue;
+                            triggerText = (b.innerText || '').trim(); break;
+                        }
+                        const inp = document.querySelector('input[name="phoneNumberInput"], input[type="tel"]');
+                        return { trigger: triggerText, inputValue: inp ? inp.value : '' };
+                    }"""
+                )
+                logger.error("[phone-reg] 号码无效诊断 trigger=%r inputValue=%r 目标=%s 期望dial=+%s",
+                             diag.get("trigger"), diag.get("inputValue"),
+                             country.cn_name, country.dial_code)
+            except Exception:
+                pass
+            _safe_refund(sms_provider, order, "ban")
+            last_err = RegisterBlocked(
+                "phone_reg",
+                f"号 {phone_e164} 被前端拒「{invalid_msg}」 — 可能国家代码未选对(dial=+{country.dial_code})",
+                is_phone=True,
+            )
             continue
 
         safe_screenshot(page, SCREENSHOT_DIR / f"phone_05_after_phone_submit_a{attempt}.png")
