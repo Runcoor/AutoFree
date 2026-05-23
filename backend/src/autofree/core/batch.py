@@ -25,7 +25,7 @@ from autofree.core.identity import random_password
 from autofree.core.mail import MailClient
 from autofree.core.oauth import fetch_personal_bundle
 from autofree.core.register import register_account
-from autofree.core.register_phone import register_phone_and_fetch_bundle
+from autofree.core.register_phone import PHONE_REG_PASSWORD, register_phone_and_fetch_bundle
 from autofree.core.storage import append_account_line, append_pending_account, write_auth_json
 
 logger = logging.getLogger(__name__)
@@ -184,7 +184,8 @@ def run_batch(
         try:
             current_domain = pick_domain()
             address_id, email = mail.create_email(domain=current_domain)
-            password = random_password()
+            # 手机号路径用固定密码(便于用户手动登录救号),邮箱路径仍用随机密码
+            password = PHONE_REG_PASSWORD if reg_mode == "phone" else random_password()
             record.update({"email": email, "password": password, "domain": current_domain,
                            "reg_mode": reg_mode})
             logger.info("[batch] (%d/%d) 邮箱=%s 域名=%s reg_mode=%s",

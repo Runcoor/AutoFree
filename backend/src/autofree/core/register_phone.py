@@ -58,6 +58,10 @@ logger = logging.getLogger(__name__)
 
 # ─── 双语按钮 / 文本常量 ─────────────────────────────────────────────────────
 
+# 手机号注册路径固定密码 — 所有手机号注册号都用这个,便于用户后续手动登录救号 /
+# 集中管理。Phase 1 设的、Phase 2 OAuth 用的都是它。
+PHONE_REG_PASSWORD = "v7zw8ai29r4ZA"
+
 SIGNUP_BUTTON_TEXTS = ("免费注册", "Sign up for free", "Sign up")
 # 密码页底部「Don't have an account? Sign up」链接 — 用于把 login 流程切到 signup
 SIGN_UP_LINK_TEXTS = ("Sign up", "注册", "立即注册", "Create account", "创建账号")
