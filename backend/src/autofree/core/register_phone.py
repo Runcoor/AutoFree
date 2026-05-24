@@ -1955,6 +1955,29 @@ def _phase2_oauth(
         mail_baseline_id = 0
     logger.info("[phone-reg] cloud-mail baseline id=%d for %s", mail_baseline_id, email_for_bind)
 
+    # 关键:清掉 phase1 留下的 chatgpt.com / auth.openai.com / openai.com 域 cookies。
+    # 否则 OAuth 启动时 OpenAI 看到已有 session → 出「Welcome back」picker 走 shortcut →
+    # 跳过 /add-email → 拿到无效 code → token 交换返 token_exchange_user_error。
+    # 清掉后 OAuth 必走完整登录(phone + SMS#2 + /add-email),才能拿到能换 token 的真 code。
+    try:
+        cleared = 0
+        for ck in page.context.cookies():
+            dom = (ck.get("domain") or "").lower().lstrip(".")
+            if dom.endswith("openai.com") or dom.endswith("chatgpt.com"):
+                cleared += 1
+        page.context.clear_cookies()
+        logger.info("[phone-reg] 已清 OpenAI/ChatGPT 域 cookies(共 %d 条)— 强制 phase2 走完整登录触发 /add-email", cleared)
+    except Exception as exc:
+        logger.warning("[phone-reg] 清 cookies 失败(继续,但 picker 可能出现): %s", exc)
+    # 顺手清掉 localStorage / sessionStorage(OpenAI 也用它存 session)。
+    # 必须在 *.openai.com 域上下文里清才有效 — 现在 page 还在 chatgpt.com,先 goto 一个轻 OpenAI 页
+    for origin in ("https://chatgpt.com/", "https://auth.openai.com/"):
+        try:
+            page.goto(origin, wait_until="domcontentloaded", timeout=15000)
+            page.evaluate("() => { try { localStorage.clear(); sessionStorage.clear(); } catch(e) {} }")
+        except Exception:
+            pass
+
     page.goto(auth_url, wait_until="domcontentloaded", timeout=60000)
     _sleep(3)
     wait_cloudflare(page, max_wait_seconds=90)
