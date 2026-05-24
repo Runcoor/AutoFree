@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Search, Download, Copy, Eye, EyeOff, ExternalLink, Check, Clock, AlertCircle, Sparkles, Cloud, RefreshCw, ChevronLeft, ChevronRight, Users, KeyRound, UserPlus, X, MailWarning } from 'lucide-react'
+import { Search, Download, Copy, Eye, EyeOff, ExternalLink, Check, Clock, AlertCircle, Sparkles, Cloud, RefreshCw, ChevronLeft, ChevronRight, Users, KeyRound, UserPlus, X, MailWarning, MailPlus } from 'lucide-react'
 import { accountsApi, freegenApi, type Account, type FreegenStatus } from '../api/endpoints'
 import { Button, Card, CardHeader, LiveDot, Pill, ProgressBar, Textarea, useToast } from '../components/ui'
 
@@ -118,6 +118,30 @@ export function AccountsPage() {
       push(err?.response?.data?.detail || '启动失败', 'danger')
     } finally {
       setReauthing(null)
+    }
+  }
+
+  const [binding, setBinding] = useState<string | null>(null)
+  async function bindEmail(a: Account) {
+    if (resumeStatus && !['finished', 'stopped', 'failed'].includes(resumeStatus.stage || '')) {
+      push('已有任务在运行,请等结束', 'danger')
+      return
+    }
+    if (!confirm(
+      `给 ${a.email} 补绑邮箱?\n\n` +
+      `- 用手机号 ${a.phone_e164} + 密码登录\n` +
+      `- 自动 /add-email 绑定 cloud-mail\n` +
+      `- 0 SMS,只收 1 次邮件 OTP\n` +
+      `- callback URL 自动回填到 CPA`
+    )) return
+    setBinding(a.email)
+    try {
+      const r = await accountsApi.cpaBindEmail(a.email)
+      push(`已启动补绑 task=${r.task_id} — 走 CPA OAuth URL`, 'success')
+    } catch (err: any) {
+      push(err?.response?.data?.detail || '启动失败', 'danger')
+    } finally {
+      setBinding(null)
     }
   }
 
@@ -397,6 +421,20 @@ export function AccountsPage() {
                   </td>
                   <td>
                     <div className="flex items-center gap-1 whitespace-nowrap">
+                      {!a.email_bound && a.phone_e164 && a.password && (
+                        <button
+                          type="button"
+                          title="补绑邮箱:用 CPA 提供的 OAuth URL 自动登录 + /add-email 绑 cloud-mail + 回填 callback。0 SMS,只收 1 次邮件 OTP。"
+                          className="btn btn-ghost btn-icon"
+                          disabled={binding === a.email}
+                          onClick={() => bindEmail(a)}
+                          style={{ color: 'var(--warn)' }}
+                        >
+                          {binding === a.email
+                            ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            : <MailPlus className="w-3.5 h-3.5" />}
+                        </button>
+                      )}
                       <button
                         type="button"
                         title="自动 refresh + 推 CPA(refresh_token 还有效时用这个)"

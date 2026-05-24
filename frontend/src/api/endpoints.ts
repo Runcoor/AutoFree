@@ -287,4 +287,8 @@ export const accountsApi = {
     api.post<{ task_id: string; batch_id: string; email: string; mode: 'reauth' }>(
       `/accounts/${encodeURIComponent(email)}/re-auth`,
     ).then(r => r.data),
+  cpaBindEmail: (email: string) =>
+    api.post<{ task_id: string; email: string; mode: 'cpa_bind_email' }>(
+      `/accounts/${encodeURIComponent(email)}/cpa-bind-email`,
+    ).then(r => r.data),
 }

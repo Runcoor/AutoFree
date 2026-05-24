@@ -130,6 +130,27 @@ def from_iso(iso: str) -> PhoneCountry:
     return _BY_ISO.get(iso.strip().lower(), DEFAULT)
 
 
+def from_e164(phone_e164: str) -> PhoneCountry:
+    """+5521... → PhoneCountry(BR)。dial code 长度不一,逐位试匹配最长前缀。
+
+    找不到 / 输入非法返 DEFAULT(GB)。补绑流程没有 country slug 时用它从手机号反推。
+    """
+    s = (phone_e164 or "").strip()
+    if not s:
+        return DEFAULT
+    if s.startswith("+"):
+        s = s[1:]
+    if not s.isdigit():
+        return DEFAULT
+    # dial code 1-3 位都有,试 3→2→1 优先长前缀(避 +1 抢 +1xxx 的歧义)
+    for prefix_len in (4, 3, 2, 1):
+        prefix = s[:prefix_len]
+        for c in _COUNTRIES:
+            if c.dial_code == prefix:
+                return c
+    return DEFAULT
+
+
 def strip_dial_prefix(phone_e164: str, country: PhoneCountry) -> str:
     """+44 7912345678 → 7912345678(去掉 + 和 dial code)。
 

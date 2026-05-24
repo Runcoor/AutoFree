@@ -407,6 +407,180 @@ def sync_all_unsynced(
     }
 
 
+# ─── CPA OAuth 补绑邮箱(走 CPA 提供的 authorize URL,phone+password 登录) ──
+
+def _runner_cpa_bind_email(task_id: str, email: str) -> None:
+    """对一个 phone-only 号跑「CPA 提供的 authorize URL → 浏览器 OAuth → 回填 callback」流程。
+
+    全程不消耗 SMS — 用 phase1 设的固定密码登录。/add-email 自动触发,
+    绑定 cloud-mail 邮箱后 callback URL 回填给 CPA 自己换 token。
+    """
+    import datetime as _dt
+    import logging
+
+    from sqlalchemy import select
+
+    from autofree.api import freegen as _f
+    from autofree.core.control import is_stop_requested
+    from autofree.core.cpa_oauth_bind import bind_email_via_external_oauth
+    from autofree.core.cpa_sync import get_codex_auth_url, submit_oauth_callback
+    from autofree.core.mail import MailClient
+    from autofree.db.base import SessionLocal
+    from autofree.db.models import Account as _Account
+
+    _log = logging.getLogger(__name__)
+    state = _f._current
+
+    def _set_stage(stage: str, **extra):
+        state["stage"] = stage
+        for k, v in extra.items():
+            state[k] = v
+        state.setdefault("events", []).append({
+            "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "stage": stage, **extra,
+        })
+
+    try:
+        _set_stage("started")
+        with SessionLocal() as db:
+            account = db.execute(select(_Account).where(_Account.email == email)).scalar_one_or_none()
+        if not account:
+            _set_stage("failed", error="账号不存在")
+            return
+        if not account.phone_e164:
+            _set_stage("failed", error="Account.phone_e164 为空 — 此号不是 phone-reg 注册,无法走补绑")
+            return
+        if not account.password:
+            _set_stage("failed", error="Account.password 为空 — 没设密码,补绑必须 SMS(暂不支持)")
+            return
+
+        _set_stage("cpa_fetching_auth_url")
+        ok, payload = get_codex_auth_url()
+        if not ok or not isinstance(payload, dict):
+            _set_stage("failed", error=f"CPA 取 auth_url 失败: {payload}")
+            return
+        auth_url = payload["url"]
+        cpa_state = payload["state"]
+        _log.info("[cpa-bind] 拿到 CPA auth_url state=%s", cpa_state[:8])
+
+        if is_stop_requested():
+            _set_stage("stopped")
+            return
+
+        _set_stage("oauth_running")
+        mail = MailClient()
+        try:
+            result = bind_email_via_external_oauth(
+                auth_url=auth_url,
+                phone_e164=account.phone_e164,
+                password=account.password,
+                email_for_bind=account.email,
+                mail_client=mail,
+            )
+        except Exception as exc:
+            _log.exception("[cpa-bind] OAuth 跑失败")
+            _set_stage("failed", error=f"OAuth 失败: {exc}")
+            return
+
+        callback_url = result["callback_url"]
+        email_bound = bool(result.get("email_bound"))
+
+        _set_stage("cpa_posting_callback")
+        ok_post, msg_post = submit_oauth_callback(callback_url)
+        if not ok_post:
+            _set_stage("failed", error=f"回填 CPA 失败: {msg_post}", callback_url=callback_url)
+            return
+
+        # 更新 Account.email_bound
+        if email_bound:
+            with SessionLocal() as db:
+                a2 = db.execute(select(_Account).where(_Account.email == email)).scalar_one_or_none()
+                if a2 and not a2.email_bound:
+                    a2.email_bound = True
+                    db.commit()
+                    _log.info("[cpa-bind] Account %s email_bound 标 True", email)
+
+        _set_stage(
+            "finished",
+            email_bound=email_bound,
+            callback_url=callback_url,
+            cpa_state=cpa_state,
+            cpa_msg=msg_post,
+        )
+        _log.info("[cpa-bind] ✅ 完成 email=%s email_bound=%s", email, email_bound)
+
+    except Exception as exc:
+        _log.exception("[cpa-bind] 未预期异常")
+        _set_stage("failed", error=f"未预期异常: {exc}")
+
+
+@router.post("/{email}/cpa-bind-email", status_code=202)
+def cpa_bind_email(
+    email: str,
+    db: Session = Depends(get_db),
+    _user=Depends(require_user),
+) -> dict:
+    """给已注册 phone-only 号自动补绑邮箱(走 CPA 的 OAuth URL)。
+
+    流程:
+    1. CPA `/codex-auth-url` 拿 authorize URL(CPA 持 PKCE verifier)
+    2. AutoFree 用 Playwright 跑 OAuth:phone + password 登录 → /add-email → cloud-mail OTP
+    3. 截获完整 callback URL,POST 回 CPA `/oauth-callback`
+    4. 标记 Account.email_bound = True
+
+    成本:0 SMS + 1 cloud-mail OTP。前提:Account 有 phone_e164 + password。
+
+    返 task_id,前端用 GET /freegen/status 轮询进度。
+    """
+    a = db.execute(select(Account).where(Account.email == email)).scalar_one_or_none()
+    if not a:
+        raise HTTPException(404, "账号不存在")
+    if not a.phone_e164:
+        raise HTTPException(400, "此号没记录 phone_e164(可能是历史 email-reg 号或更早版本注册的)")
+    if not a.password:
+        raise HTTPException(400, "此号无密码 — 无法走 phone+password 路径")
+    if a.email_bound:
+        raise HTTPException(400, f"账号 {email} 已绑邮箱(email_bound=True),无需补绑")
+
+    from autofree.api.freegen import _current, _lock
+    from autofree.api import freegen as _f
+    from autofree.core.control import reset_stop
+    import threading
+    import uuid
+
+    with _lock:
+        if _current and _current.get("stage") not in ("finished", "stopped", "failed"):
+            raise HTTPException(409, "已有任务在运行,请等待结束或先 stop")
+
+        task_id = uuid.uuid4().hex[:12]
+        _f._current = {
+            "task_id": task_id,
+            "batch_id": a.batch_id,
+            "stage": "pending",
+            "index": 0,
+            "total": 1,
+            "ok": 0,
+            "failed": 0,
+            "current_email": email,
+            "events": [],
+            "stop_requested": False,
+            "thread": None,
+            "started_at": None,
+            "mode": "cpa_bind_email",
+        }
+        reset_stop()
+
+        t = threading.Thread(
+            target=_runner_cpa_bind_email,
+            args=(task_id, email),
+            name=f"cpa-bind-{task_id}", daemon=True,
+        )
+        _f._current["thread"] = t
+        t.start()
+
+    return {"task_id": task_id, "email": email, "mode": "cpa_bind_email"}
+
+
 @router.post("/{email}/re-auth", status_code=202)
 def reauth_account(
     email: str,
