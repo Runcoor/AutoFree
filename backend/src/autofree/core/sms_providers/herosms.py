@@ -229,6 +229,22 @@ class HeroSmsProvider(SmsProvider):
         except requests.RequestException as exc:
             raise SmsError(f"[hero-sms] 网络异常 action={action}: {exc}") from exc
         if resp.status_code != 200:
+            # HTTP 400 + WRONG_MAX_PRICE:用户设的 max_price 低于该国家/服务的最低价。
+            # 重试无意义(每次都同样错),用 SmsConfigMissing 直接抛出去到 batch 层。
+            if resp.status_code == 400 and "WRONG_MAX_PRICE" in resp.text:
+                try:
+                    import json as _json
+                    body = _json.loads(resp.text)
+                    minp = (body.get("info") or {}).get("min")
+                    sent = (params or {}).get("maxPrice")
+                    raise SmsConfigMissing(
+                        f"[hero-sms] max_price=${sent} 低于该国家/服务最低价 "
+                        f"${minp} — 请调高 max_price 或换国家/服务"
+                    )
+                except SmsConfigMissing:
+                    raise
+                except Exception:
+                    pass
             raise SmsError(f"[hero-sms] HTTP {resp.status_code} action={action}: {resp.text[:200]}")
         text = resp.text.strip()
         if text in ("BAD_KEY", "NO_KEY"):

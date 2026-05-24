@@ -1962,6 +1962,11 @@ def register_phone_and_fetch_bundle(
             if order is not None and not finished_committed:
                 _safe_refund(sms_provider, order, "cancel")
             raise
+        except sms_mod.SmsConfigMissing as exc:
+            # 配置类错误(api_key 无效 / max_price 低于最低价 / 国家不支持等)
+            # — 没有 order 可退,直接转 RegisterFailed,batch 层只 log warning 不打 traceback
+            logger.warning("[phone-reg] SMS 配置错误: %s", exc)
+            raise RegisterFailed(f"SMS 配置错误: {exc}") from exc
         except Exception as exc:
             logger.exception("[phone-reg] 未预期异常")
             if order is not None and not finished_committed:
