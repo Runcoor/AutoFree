@@ -1558,6 +1558,9 @@ def _phase1_signup(
     last_url = ""
     # 诊断计数:Phase 1 是否真的走过密码页 / about-you 等
     diag_counts = {"pw_hit": 0, "about_you_hit": 0, "fallback_hit": 0, "rounds": 0}
+    # 主循环里 SMS 验证页换号次数(场景:phone → 密码 → about-you → SMS code,
+    # 这种 SMS 验证是在主循环里等的,跟上面的 SMS retry 循环分开计数)
+    main_sms_attempts = 0
     for round_idx in range(20):
         if is_stop_requested():
             raise BatchStopped("phone reg phase1 完成资料阶段收到 stop")
@@ -1668,9 +1671,67 @@ def _phase1_signup(
             except sms_mod.SmsAborted:
                 raise BatchStopped("phone reg phase1 SMS 等待时收到 stop")
             except sms_mod.SmsTimeout as exc:
-                logger.warning("[phone-reg] phase1 r%d SMS 超时 %ds — 死号 ban", round_idx, SMS_WAIT_SECONDS)
+                main_sms_attempts += 1
+                logger.warning(
+                    "[phone-reg] phase1 r%d 主循环 SMS 超时 %ds order=%d — ban 换号 "
+                    "(主循环换号 %d/%d)",
+                    round_idx, SMS_WAIT_SECONDS, order.id,
+                    main_sms_attempts, MAX_SMS_BUY_ATTEMPTS,
+                )
                 _safe_refund(sms_provider, order, "ban")
-                raise RegisterBlocked("phone_reg", f"SMS#1 超时: {exc}", is_phone=True) from exc
+                if main_sms_attempts >= MAX_SMS_BUY_ATTEMPTS:
+                    raise RegisterBlocked(
+                        "phone_reg",
+                        f"主循环 SMS 超时 {MAX_SMS_BUY_ATTEMPTS} 次都没收到: {exc}",
+                        is_phone=True,
+                    ) from exc
+                # 换号:回退到手机号输入态 → 买新号 → 填 → 提交 → 等 SMS 框 → 主循环继续
+                try:
+                    if not _back_to_phone_input(page, country):
+                        raise RegisterBlocked(
+                            "phone_reg",
+                            "SMS 超时后无法回退到手机号输入态",
+                            is_phone=True,
+                        )
+                    new_order = _buy_phone_order(
+                        sms_provider, sms_cfg, attempt_idx=main_sms_attempts + 100,
+                    )
+                    if new_order.id in used_order_ids:
+                        _safe_refund(sms_provider, new_order, "cancel")
+                        raise RegisterBlocked(
+                            "phone_reg", "provider 反复给同号", is_phone=True,
+                        )
+                    used_order_ids.append(new_order.id)
+                    new_e164 = (new_order.phone or "").strip()
+                    if new_e164 and not new_e164.startswith("+"):
+                        new_e164 = "+" + new_e164
+                    new_local = strip_dial_prefix(new_e164, country)
+                    logger.info(
+                        "[phone-reg] phase1 主循环换号成功 new_order=%d phone=%s",
+                        new_order.id, new_e164,
+                    )
+                    _select_country(page, country)
+                    _sleep(1)
+                    _fill_phone_input(page, new_local, new_e164, country)
+                    if not _click_submit_button(page):
+                        _safe_refund(sms_provider, new_order, "cancel")
+                        raise RegisterBlocked(
+                            "phone_reg", "换号后提交按钮点击失败", is_phone=True,
+                        )
+                    _sleep(3)
+                    wait_cloudflare(page, max_wait_seconds=60)
+                    _sleep(2)
+                    order = new_order
+                    phone_e164 = new_e164
+                    last_url = ""  # 重置避免下一轮主循环 dedupe 跳过
+                    continue
+                except RegisterBlocked:
+                    raise
+                except Exception as e2:
+                    logger.exception("[phone-reg] 主循环换号过程异常")
+                    raise RegisterBlocked(
+                        "phone_reg", f"主循环换号异常: {e2}", is_phone=True,
+                    ) from e2
 
             if not _fill_sms_code_smart(page, code):
                 safe_screenshot(page, SCREENSHOT_DIR / f"phone_07_main_sms_fill_failed_r{round_idx}.png")
