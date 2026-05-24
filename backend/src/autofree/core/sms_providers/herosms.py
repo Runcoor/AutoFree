@@ -160,10 +160,13 @@ COUNTRY_NAME_TO_ID = {
     "乌克兰": 1,
 }
 
-# 服务代码 — sms-activate 行规
+# 服务代码 — 注意 hero-sms 与 sms-activate 标准**不一样**(尤其 OpenAI):
+#   hero-sms:  dr = OpenAI,  ot = "Any other"(杂项 fallback,贵 3 倍)
+#   sms-act:   ot = OpenAI
+# 已用 /api/v1/left-menu/services 实际验证(2026-05)。其它常用 service 两边一致。
 SERVICE_NAME_TO_CODE = {
-    "openai": "ot", "chatgpt": "ot", "gpt": "ot",
-    "google": "go", "gmail": "go",
+    "openai": "dr", "chatgpt": "dr", "gpt": "dr",
+    "google": "go", "gmail": "go", "youtube": "go",
     "telegram": "tg",
     "whatsapp": "wa",
     "facebook": "fb",
