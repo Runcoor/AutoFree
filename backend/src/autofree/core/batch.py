@@ -157,18 +157,26 @@ def run_batch(
         register_done = False  # 注册阶段是否完成 — 决定失败时是否保留邮箱+写 pending
         record: dict[str, Any] = {"index": i, "ok": False}
 
-        def _to_pending(error_kind: str, error: str, *, phone_paid: bool = False) -> None:
+        def _to_pending(error_kind: str, error: str, *, phone_paid: bool = False,
+                        phone_e164: str = "") -> None:
             """注册成功但 OAuth 失败 → 保留邮箱 + 写 pending,等用户手动认证。
 
             phone_paid=True 时,此号已通过手机验证(5sim 真实扣过费),resume 时优先且不要丢。
+            phone_e164 非空时,这号是 phone-reg 失败号,真正能登录的凭证是手机号+密码
+            而不是 email(没绑)。UI 必须显示手机号方便用户手动登录补救。
             """
             try:
                 append_pending_account(
                     email=email, password=password, batch_id=batch_id,
                     error_kind=error_kind, error=error,
                     phone_verified=phone_paid,
+                    phone_e164=phone_e164,
                 )
-                if phone_paid:
+                if phone_e164:
+                    logger.info("[batch] %s 已加入 pending(phone=%s%s)",
+                                email, phone_e164,
+                                " 💰 已付费" if phone_paid else "")
+                elif phone_paid:
                     logger.info("[batch] %s 已加入 pending(💰 已付费/手机已验证)", email)
                 else:
                     logger.info("[batch] %s 已加入 pending(邮箱保留,可手动 OAuth)", email)
@@ -304,37 +312,47 @@ def run_batch(
         except RegisterBlocked as exc:
             kind = "phone" if exc.is_phone else "duplicate" if exc.is_duplicate else "blocked"
             phone_paid = bool(getattr(exc, "phone_paid_via_sms", False))
+            exc_phone = (getattr(exc, "phone_e164", "") or "").strip()
             record["error"] = f"blocked: {exc}"
             record["error_kind"] = kind
             record["phone_verified"] = phone_paid
+            record["phone_e164"] = exc_phone
             failed_count += 1
-            logger.error("[batch] (%d/%d) ❌ blocked: %s%s", i, count, exc,
-                         " (💰 phone 已付费)" if phone_paid else "")
+            logger.error("[batch] (%d/%d) ❌ blocked: %s%s%s", i, count, exc,
+                         " (💰 phone 已付费)" if phone_paid else "",
+                         f" phone={exc_phone}" if exc_phone else "")
             _emit("account_done", {**idx_info, "ok": False, "email": email,
                                    "password": password, "batch_id": batch_id,
                                    "error": str(exc), "error_kind": kind,
                                    "phone_verified": phone_paid,
+                                   "phone_e164": exc_phone,
                                    "register_done": register_done})
             if register_done:
-                _to_pending(kind, str(exc), phone_paid=phone_paid)
+                _to_pending(kind, str(exc), phone_paid=phone_paid, phone_e164=exc_phone)
             else:
                 _drop_email()
         except RegisterFailed as exc:
+            exc_phone = (getattr(exc, "phone_e164", "") or "").strip()
             record["error"] = f"register_failed: {exc}"
             record["error_kind"] = "register"
+            record["phone_e164"] = exc_phone
             failed_count += 1
-            logger.error("[batch] (%d/%d) ❌ register_failed: %s", i, count, exc)
+            logger.error("[batch] (%d/%d) ❌ register_failed: %s%s", i, count, exc,
+                         f" phone={exc_phone}" if exc_phone else "")
             _emit("account_done", {**idx_info, "ok": False, "email": email,
                                    "password": password, "batch_id": batch_id,
                                    "error": str(exc), "error_kind": "register",
+                                   "phone_e164": exc_phone,
                                    "register_done": register_done})
             _drop_email()
         except AccountDeactivated as exc:
             # 终结性:号已被 OpenAI 停用,reauth 无意义。不写 pending,标记 error_kind=deactivated。
             phone_paid = bool(getattr(exc, "phone_paid_via_sms", False))
+            exc_phone = (getattr(exc, "phone_e164", "") or "").strip()
             record["error"] = f"account_deactivated: {exc}"
             record["error_kind"] = "deactivated"
             record["phone_verified"] = phone_paid
+            record["phone_e164"] = exc_phone
             failed_count += 1
             logger.error("[batch] (%d/%d) 🪦 deactivated: %s%s", i, count, exc,
                          " (💰 phone 已付费但号已废)" if phone_paid else "")
@@ -342,29 +360,36 @@ def run_batch(
                                    "password": password, "batch_id": batch_id,
                                    "error": str(exc), "error_kind": "deactivated",
                                    "phone_verified": phone_paid,
+                                   "phone_e164": exc_phone,
                                    "register_done": register_done})
         except OAuthFailed as exc:
             phone_paid = bool(getattr(exc, "phone_paid_via_sms", False))
+            exc_phone = (getattr(exc, "phone_e164", "") or "").strip()
             record["error"] = f"oauth_failed: {exc}"
             record["error_kind"] = "oauth"
             record["phone_verified"] = phone_paid
+            record["phone_e164"] = exc_phone
             failed_count += 1
             tag = "💰 oauth_failed (phone 已付费)" if phone_paid else "❌ oauth_failed"
-            logger.error("[batch] (%d/%d) %s: %s", i, count, tag, exc)
+            logger.error("[batch] (%d/%d) %s: %s%s", i, count, tag, exc,
+                         f" phone={exc_phone}" if exc_phone else "")
             _emit("account_done", {**idx_info, "ok": False, "email": email,
                                    "password": password, "batch_id": batch_id,
                                    "error": str(exc), "error_kind": "oauth",
                                    "phone_verified": phone_paid,
+                                   "phone_e164": exc_phone,
                                    "register_done": register_done})
             if register_done:
-                _to_pending("oauth", str(exc), phone_paid=phone_paid)
+                _to_pending("oauth", str(exc), phone_paid=phone_paid, phone_e164=exc_phone)
             # OAuthFailed 必然 register_done=True (fetch_personal_bundle 才会抛),无 else
         except BatchStopped as exc:
             # 用户中断 — 当前账号记 stopped;若已注册成功也写 pending(可后续手动 OAuth)
             phone_paid = bool(getattr(exc, "phone_paid_via_sms", False))
+            exc_phone = (getattr(exc, "phone_e164", "") or "").strip()
             record["error"] = f"stopped: {exc}"
             record["error_kind"] = "stopped"
             record["phone_verified"] = phone_paid
+            record["phone_e164"] = exc_phone
             failed_count += 1
             logger.warning("[batch] (%d/%d) ⏹ stopped: %s%s", i, count, exc,
                            " (💰 phone 已付费)" if phone_paid else "")
@@ -372,9 +397,10 @@ def run_batch(
                                    "password": password, "batch_id": batch_id,
                                    "error": str(exc), "error_kind": "stopped",
                                    "phone_verified": phone_paid,
+                                   "phone_e164": exc_phone,
                                    "register_done": register_done})
             if register_done:
-                _to_pending("stopped", str(exc), phone_paid=phone_paid)
+                _to_pending("stopped", str(exc), phone_paid=phone_paid, phone_e164=exc_phone)
             else:
                 _drop_email()
             results.append(record)
@@ -384,18 +410,21 @@ def run_batch(
             break
         except Exception as exc:
             phone_paid = bool(getattr(exc, "phone_paid_via_sms", False))
+            exc_phone = (getattr(exc, "phone_e164", "") or "").strip()
             record["error"] = f"unexpected: {exc}"
             record["error_kind"] = "unexpected"
             record["phone_verified"] = phone_paid
+            record["phone_e164"] = exc_phone
             failed_count += 1
             logger.exception("[batch] (%d/%d) ❌ unexpected", i, count)
             _emit("account_done", {**idx_info, "ok": False, "email": email,
                                    "password": password, "batch_id": batch_id,
                                    "error": str(exc), "error_kind": "unexpected",
                                    "phone_verified": phone_paid,
+                                   "phone_e164": exc_phone,
                                    "register_done": register_done})
             if register_done:
-                _to_pending("unexpected", str(exc), phone_paid=phone_paid)
+                _to_pending("unexpected", str(exc), phone_paid=phone_paid, phone_e164=exc_phone)
             else:
                 _drop_email()
 

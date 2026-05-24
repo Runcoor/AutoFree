@@ -210,6 +210,7 @@ def _persist_account(info: dict, *, domain: str | None = None) -> None:
             elif info.get("register_done"):
                 # 注册批次失败 → 写 pending(append_pending_account 已写 jsonl,这里写 DB)
                 phone_verified = bool(info.get("phone_verified"))
+                phone_e164 = (info.get("phone_e164") or "").strip()
                 p = PendingAccount(
                     batch_id=info.get("batch_id", ""),
                     email=email,
@@ -218,9 +219,14 @@ def _persist_account(info: dict, *, domain: str | None = None) -> None:
                     error=info.get("error", ""),
                     phone_verified=phone_verified,
                     phone_verified_at=_utcnow() if phone_verified else None,
+                    phone_e164=phone_e164,
                 )
                 db.add(p)
-                if phone_verified:
+                if phone_e164:
+                    logger.info("[persist] pending %s 已记 phone=%s%s — 用户可手动用此号 + 密码登录 chatgpt.com",
+                                email, phone_e164,
+                                " 💰" if phone_verified else "")
+                elif phone_verified:
                     logger.info("[persist] 💰 pending %s 已标记 phone_verified — 5sim 已扣费",
                                 email)
 

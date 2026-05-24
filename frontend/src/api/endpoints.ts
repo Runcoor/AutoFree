@@ -209,6 +209,7 @@ export interface PendingAccount {
   id: number; batch_id: string; email: string; password: string
   error_kind: string; error: string
   phone_verified: boolean; phone_verified_at: string | null
+  phone_e164: string
   created_at: string | null; resolved_at: string | null; resolved_via: string | null
 }
 

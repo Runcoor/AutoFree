@@ -58,6 +58,7 @@ def _serialize_pending(p: PendingAccount) -> dict:
         "error": p.error,
         "phone_verified": p.phone_verified,
         "phone_verified_at": p.phone_verified_at.isoformat() if p.phone_verified_at else None,
+        "phone_e164": getattr(p, "phone_e164", "") or "",
         "created_at": p.created_at.isoformat() if p.created_at else None,
         "resolved_at": p.resolved_at.isoformat() if p.resolved_at else None,
         "resolved_via": p.resolved_via,

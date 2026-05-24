@@ -61,6 +61,8 @@ def _ensure_phone_verified_columns() -> None:
         # phone-reg 注册号的手机号 + 是否已绑邮箱 — 用于后续手动补绑识别
         ("account", "phone_e164", "VARCHAR(32) DEFAULT '' NOT NULL"),
         ("account", "email_bound", "BOOLEAN DEFAULT 1 NOT NULL"),
+        # phase1 付费但 phase2 失败的号要留手机号,后续用户能 chatgpt.com 手动登录补救
+        ("pending_account", "phone_e164", "VARCHAR(32) DEFAULT '' NOT NULL"),
     ]
     with SessionLocal() as db:
         for table, col, coldef in statements:

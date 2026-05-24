@@ -124,6 +124,9 @@ class PendingAccount(Base):
     # 5sim 真实扣过费 / 历史已验证 → 此号已通过手机验证。resume 时优先,绝不能丢
     phone_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     phone_verified_at: Mapped[Optional[_dt.datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # phone-reg 失败后必须保留手机号 — 这号花了 SMS 钱,后续用户要手动登录
+    # OpenAI 补救。email 只是 cloud-mail 占位,真正能登录的凭证是 phone + password
+    phone_e164: Mapped[str] = mapped_column(String(32), default="", nullable=False, index=True)
     created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     resolved_at: Mapped[Optional[_dt.datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_via: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)

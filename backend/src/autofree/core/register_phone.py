@@ -2777,6 +2777,11 @@ def register_phone_and_fetch_bundle(
 
         except (RegisterBlocked, RegisterFailed, OAuthFailed) as exc:
             # 已知错误 — 退款(SMS 没成功消费就退,成功消费但 OAuth 失败就 cancel)
+            # 不论成败,把 phone_e164 挂到异常上,让 batch.py 能写到 pending
+            try:
+                exc.phone_e164 = phone_e164  # type: ignore[attr-defined]
+            except Exception:
+                pass
             if order is not None and not finished_committed:
                 if isinstance(exc, OAuthFailed):
                     # Phase 2 失败:SMS#1 已消费(Phase 1 用过) → cancel 试图退,但

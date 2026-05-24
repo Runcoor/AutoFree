@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Trash2, KeyRound, Clock, RefreshCw, Upload, X, Check, AlertCircle, Play, Square, Zap } from 'lucide-react'
+import { Trash2, KeyRound, Clock, RefreshCw, Upload, X, Check, AlertCircle, Play, Square, Zap, Copy } from 'lucide-react'
 import { accountsApi, freegenApi, type FreegenStatus, type PendingAccount } from '../api/endpoints'
 import { Button, Card, CardBody, CardHeader, LiveDot, Pill, ProgressBar, Textarea, useToast } from '../components/ui'
 
@@ -251,6 +251,7 @@ export function PendingPage() {
               <tr>
                 <th>邮箱</th>
                 <th>密码</th>
+                <th>手机号</th>
                 <th>失败原因</th>
                 <th>时间</th>
                 <th>操作</th>
@@ -259,7 +260,7 @@ export function PendingPage() {
             <tbody>
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan={5}>
+                  <td colSpan={6}>
                     <div className="empty-state">
                       <div className="empty-icon"><Check size={22} /></div>
                       {items.length === 0
@@ -315,6 +316,36 @@ export function PendingPage() {
                   </td>
                   <td>
                     <span className="mono text-[13px]">{p.password}</span>
+                  </td>
+                  <td>
+                    {p.phone_e164 ? (
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className="mono text-[12.5px]"
+                          style={{ color: p.phone_verified ? 'var(--info)' : 'var(--ink-soft)' }}
+                          title={p.phone_verified
+                            ? `此号 SMS 已扣费 — 可用 ${p.phone_e164} + 密码登录 chatgpt.com 手动补救`
+                            : `手机号:${p.phone_e164}`}
+                        >
+                          {p.phone_e164}
+                        </span>
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-icon"
+                          style={{ width: 24, height: 24 }}
+                          onClick={() => {
+                            navigator.clipboard?.writeText(p.phone_e164)
+                            push('已复制手机号', 'success')
+                          }}
+                          aria-label="复制手机号"
+                          title="复制"
+                        >
+                          <Copy className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ) : (
+                      <span className="text-ink-faint">—</span>
+                    )}
                   </td>
                   <td>
                     <Pill tone="warn">{p.error_kind || 'unknown'}</Pill>

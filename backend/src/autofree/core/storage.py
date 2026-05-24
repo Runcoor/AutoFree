@@ -79,12 +79,14 @@ def append_pending_account(
     error_kind: str = "",
     error: str = "",
     phone_verified: bool = False,
+    phone_e164: str = "",
 ) -> Path:
     """注册成功但 OAuth 失败的号写到 pending 列表(全局,非 per-batch)。
 
     之后用户可以:
       a) 在「待办」页点「继续验证」让系统重跑 OAuth + phone gate
       b) 在 UI 直接上传 JSON 内容,写到 manual_auth/<email>.json
+      c) phone-reg 失败号:用 phone_e164 + password 手动登录 chatgpt.com 补救
     """
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     record = {
@@ -94,11 +96,13 @@ def append_pending_account(
         "error_kind": error_kind,
         "error": error,
         "phone_verified": bool(phone_verified),
+        "phone_e164": phone_e164 or "",
         "created_at": _utc_iso(time.time()),
     }
     with PENDING_FILE.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    logger.info("[storage] pending 账号已记录: %s (kind=%s)", email, error_kind)
+    logger.info("[storage] pending 账号已记录: %s (kind=%s phone=%s)",
+                email, error_kind, phone_e164 or "-")
     return PENDING_FILE
 
 
