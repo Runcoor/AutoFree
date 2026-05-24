@@ -956,42 +956,58 @@ def _fill_sms_code_smart(page: Page, code: str) -> bool:
 
 
 def _fill_about_you(page: Page, full_name: str, birth: dict[str, str]) -> None:
-    """填 about-you(姓名 + 年龄/生日)— 复刻 register.py 已有逻辑。"""
+    """填 about-you(姓名 + 年龄/生日)— 复刻 register.py 已有逻辑。
+
+    注意:chatgpt.com 新版用 React Aria 的浮动 label(`_typeableLabel`),
+    label 浮在 input 上方会拦截 click 事件。所以填值不用 Playwright .click(),
+    而是用 JS nativeSetter 直接设 value + dispatch input/change 通知 React
+    受控组件,完全绕开 actionability 检查。
+    """
     _sleep(2)
 
-    # 1) 姓名
+    def _js_set_value(selector: str, value: str) -> bool:
+        return page.evaluate(
+            """(args) => {
+                const { sel, v } = args;
+                const inp = document.querySelector(sel);
+                if (!inp) return false;
+                try { inp.focus(); } catch (e) {}
+                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                setter.call(inp, v);
+                inp.dispatchEvent(new Event('input', { bubbles: true }));
+                inp.dispatchEvent(new Event('change', { bubbles: true }));
+                try { inp.blur(); } catch (e) {}
+                return true;
+            }""",
+            {"sel": selector, "v": value},
+        )
+
+    # 1) 姓名 — 跳过 click,直接 JS 设值
     try:
-        name_input = page.locator(
-            'input[name="name"], input[autocomplete="name"], input[placeholder*="name" i], '
-            'input[placeholder*="姓名"]'
-        ).first
-        if name_input.is_visible(timeout=3000):
-            name_input.click(click_count=3)
-            page.keyboard.type(full_name, delay=30)
-            logger.info("[phone-reg] about-you 姓名: %s", full_name)
+        name_set = _js_set_value('input[name="name"]', full_name)
+        if not name_set:
+            # 退路:其它选择器
+            for sel in ('input[autocomplete="name"]',
+                        'input[placeholder*="name" i]',
+                        'input[placeholder*="姓名"]'):
+                if _js_set_value(sel, full_name):
+                    name_set = True
+                    break
+        if name_set:
+            logger.info("[phone-reg] about-you 姓名: %s (JS 设值)", full_name)
     except Exception as exc:
         logger.debug("[phone-reg] 姓名填写失败: %s", exc)
 
     # 2) 年龄(新版)或生日 3 段(旧版 spinbutton)
     age_str = str(int(time.strftime("%Y")) - int(birth["year"]))
     try:
-        age_input = page.locator('input[name="age"]').first
-        if age_input.is_visible(timeout=1500):
-            age_input.click(click_count=3)
-            page.keyboard.press("Backspace")
-            page.keyboard.type(age_str, delay=50)
-            page.evaluate(
-                """(v) => {
-                    const inp = document.querySelector('input[name="age"]');
-                    if (!inp) return;
-                    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-                    setter.call(inp, v);
-                    inp.dispatchEvent(new Event('input', { bubbles: true }));
-                    inp.dispatchEvent(new Event('change', { bubbles: true }));
-                }""",
-                age_str,
-            )
-            logger.info("[phone-reg] about-you 年龄: %s", age_str)
+        # 先看 age input 是否存在(不用 click,只看 DOM)
+        age_exists = page.evaluate(
+            """() => !!document.querySelector('input[name="age"]')"""
+        )
+        if age_exists:
+            ok = _js_set_value('input[name="age"]', age_str)
+            logger.info("[phone-reg] about-you 年龄: %s (JS 设值 ok=%s)", age_str, ok)
         else:
             # 旧版 spinbutton — 按 aria-label 识别(年/月/日 或 year/month/day)
             spinbuttons = page.locator('[role="spinbutton"]')
