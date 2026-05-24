@@ -2380,9 +2380,14 @@ def register_phone_and_fetch_bundle(
       password   — 设给账号的密码(可能 phase2 不用,但 phase1 必填)
       mail_client — cloud-mail 客户端(收 add-email 后的 OTP)
 
-    返回 bundle 同 fetch_personal_bundle:
-      {access_token, refresh_token, id_token, account_id, email, plan_type,
-       expires_at, phone_verified=True, phone}
+    返回 bundle:
+      AutoFree PKCE 模式(CPA 未配):
+        {access_token, refresh_token, id_token, account_id, email, plan_type,
+         expires_at, phone_verified=True, phone, email_bound, via_cpa=False}
+      CPA OAuth 模式(CPA 已配):
+        {email, phone, phone_verified=True, email_bound, via_cpa=True,
+         cpa_state, cpa_callback_url}
+        — 没有 access_token / refresh_token,CPA 自己用 PKCE verifier 换 token
 
     SMS 配置(provider/country/operator/service)从 DB Setting 表读 — 跟 oauth.py
     走 phone gate 时是同一套 active provider。
@@ -2397,17 +2402,40 @@ def register_phone_and_fetch_bundle(
         raise RegisterFailed(f"SMS provider 未配置: {exc}") from exc
 
     country = from_sms_slug(sms_cfg.get("country", ""))
-    logger.info(
-        "[phone-reg] 启动 email=%s provider=%s sms_country=%s phone_country=ISO=%s dial=+%s",
-        email, sms_provider.PROVIDER_NAME, sms_cfg.get("country"),
-        country.iso_code, country.dial_code,
-    )
 
-    # PKCE + state + auth URL
-    code_verifier, code_challenge = _pkce()
-    state = secrets.token_urlsafe(16)
-    auth_url = _build_auth_url(code_challenge, state)
-    logger.info("[phone-reg] OAuth state=%s redirect=%s", state[:8], CODEX_REDIRECT_URI)
+    # ── 决定 OAuth 走哪条路径 ──
+    # 1) CPA 配置可用 → 走 CPA OAuth(用 CPA 的 PKCE,callback 回填 CPA,AutoFree 不存 token)
+    # 2) CPA 没配 / 取 auth_url 失败 → 走 AutoFree PKCE(老路径,本地存 token,后续 cpa_push)
+    from autofree.core.cpa_sync import get_codex_auth_url, is_cpa_configured, submit_oauth_callback
+
+    use_cpa_oauth = is_cpa_configured()
+    cpa_state = ""
+    if use_cpa_oauth:
+        ok, payload = get_codex_auth_url()
+        if ok and isinstance(payload, dict):
+            auth_url = payload["url"]
+            cpa_state = payload["state"]
+            logger.info("[phone-reg] === CPA OAuth 模式 === state=%s", cpa_state[:8])
+        else:
+            logger.warning(
+                "[phone-reg] CPA 已配但取 auth_url 失败: %s — 回退 AutoFree PKCE 模式",
+                payload,
+            )
+            use_cpa_oauth = False
+
+    if not use_cpa_oauth:
+        # AutoFree PKCE 模式 — 自己生成 PKCE + auth_url,token 交换后存本地
+        code_verifier, code_challenge = _pkce()
+        state = secrets.token_urlsafe(16)
+        auth_url = _build_auth_url(code_challenge, state)
+        logger.info("[phone-reg] === AutoFree PKCE 模式 === state=%s redirect=%s",
+                    state[:8], CODEX_REDIRECT_URI)
+
+    logger.info(
+        "[phone-reg] 启动 email=%s provider=%s sms_country=%s phone_country=ISO=%s dial=+%s mode=%s",
+        email, sms_provider.PROVIDER_NAME, sms_cfg.get("country"),
+        country.iso_code, country.dial_code, "cpa" if use_cpa_oauth else "autofree",
+    )
 
     # 身份资料
     full_name = random_full_name()
@@ -2422,6 +2450,7 @@ def register_phone_and_fetch_bundle(
         logger.info("[phone-reg] 使用代理 session=%s", proxy_session_id)
 
     auth_code: list[str | None] = [None]
+    full_callback_url: list[str | None] = [None]  # CPA 模式要用完整 URL
     order = None
     phone_e164 = ""
     finished_committed = False
@@ -2442,6 +2471,7 @@ def register_phone_and_fetch_bundle(
             c = qs.get("code", [None])[0]
             if c:
                 auth_code[0] = c
+                full_callback_url[0] = u  # 完整 URL — CPA 模式回填给 CPA
                 logger.info("[phone-reg] 捕获 auth_code (%s) url=%s", source, u[:120])
                 return True
             return False
@@ -2484,17 +2514,54 @@ def register_phone_and_fetch_bundle(
                 safe_screenshot(page, SCREENSHOT_DIR / "phone_31_no_auth_code.png")
                 raise OAuthFailed("Phase 2 完成但未捕获到 auth_code")
 
-            # 给 OpenAI 后端时间 finalize auth_code,避免太快 exchange 撞
-            # token_exchange_user_error("try again later")
+            # 给 OpenAI 后端时间 finalize auth_code
             time.sleep(1.5)
 
-            # 交换 token(内部有 3 次重试,处理临时性 try-again 错误)
+            if use_cpa_oauth:
+                # ── CPA OAuth 模式 ── 把完整 callback URL 回填给 CPA,让 CPA 自己换 token
+                callback_url = full_callback_url[0] or ""
+                if not callback_url:
+                    raise OAuthFailed("CPA 模式但 full_callback_url 为空")
+                logger.info("[phone-reg] 回填 callback URL 给 CPA state=%s url=%s",
+                            cpa_state[:8], callback_url[:120])
+                ok_post, msg_post = submit_oauth_callback(callback_url)
+                if not ok_post:
+                    raise OAuthFailed(f"回填 CPA /oauth-callback 失败: {msg_post}")
+                logger.info("[phone-reg] ✅ CPA 已收 callback: %s", msg_post)
+
+                # 提交 SMS 订单(确认扣费)
+                try:
+                    sms_provider.finish_order(order.id)
+                    finished_committed = True
+                    logger.info("[phone-reg] ✅ CPA 模式全流程成功 sms order=%d finish_order 提交",
+                                order.id)
+                except Exception as exc:
+                    logger.warning("[phone-reg] finish_order 失败(callback 已回填,不影响): %s", exc)
+
+                # 返回不含 token 的 bundle(CPA 独占 token)
+                return {
+                    "email": email,
+                    "phone": phone_e164,
+                    "phone_verified": True,
+                    "email_bound": bool(email_bound),
+                    "via_cpa": True,
+                    "cpa_state": cpa_state,
+                    "cpa_callback_url": callback_url,
+                    # token / id_token / expires_at / account_id 都没有,CPA 那边有
+                    "access_token": "",
+                    "refresh_token": "",
+                    "id_token": "",
+                    "account_id": "",
+                    "plan_type": "free",
+                    "expires_at": None,
+                }
+
+            # ── AutoFree PKCE 模式 ── 自己换 token
             bundle = _exchange_code(auth_code[0], code_verifier, fallback_email=email)
             bundle["phone_verified"] = True
             bundle["phone"] = phone_e164
-            # email_bound = False 说明 OAuth 走了 picker shortcut 没触发 /add-email,
-            # 后续 reauth 必须再花钱 SMS — UI 据此提示用户手动到 settings 补绑邮箱
             bundle["email_bound"] = bool(email_bound)
+            bundle["via_cpa"] = False
 
             # 提交订单(确认扣费)
             try:
