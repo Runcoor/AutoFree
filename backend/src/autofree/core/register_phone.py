@@ -1914,7 +1914,16 @@ def _phase2_oauth(
 
         # callback 抓到了?
         if capture_callback():
-            logger.info("[phone-reg] ✅ Phase 2 callback 已捕获")
+            if email_bound:
+                logger.info("[phone-reg] ✅ Phase 2 callback 已捕获(email 已绑定 %s)",
+                            email_for_bind)
+            else:
+                logger.warning(
+                    "[phone-reg] ⚠️ Phase 2 callback 已捕获,但 /add-email 未触发 — "
+                    "账号未绑定 email,以后 reauth 必须用 SMS(花钱)。"
+                    "如要补绑请手动登录 chatgpt.com/account/settings 加 email %s",
+                    email_for_bind,
+                )
             return True
 
         try:
@@ -2175,22 +2184,59 @@ def _phase2_oauth(
             continue
 
         # 7.5) 「Welcome back / Choose an account」picker — OAuth 流程里 OpenAI
-        # 偶尔插入一步要求选账号(此刻已登录的账号会列出来,点它继续 OAuth)
+        # 看到已登录 session 时插入这步要求选账号。直接点已有账号 = shortcut callback,
+        # 但**会跳过 /add-email**,账号永远只有 phone 登录,以后 reauth 必须 SMS 花钱。
+        # 所以优先点「Log in to another account」走 fresh OAuth,让 OpenAI 引导到
+        # phone-login → SMS#2 → /add-email,把 cloud-mail 邮箱绑上。
         try:
             body_text = page.inner_text("body", timeout=1500)[:2000]
         except Exception:
             body_text = ""
         if ("Welcome back" in body_text or "选择账号" in body_text
                 or "Choose an account" in body_text):
-            logger.info("[phone-reg] phase2 r%d Account picker (Welcome back) — 点首个账号",
+            logger.info("[phone-reg] phase2 r%d Account picker (Welcome back) — "
+                        "优先点「Log in to another account」走 fresh OAuth 触发 add-email",
                         round_idx)
             try:
-                # 点除「Log in to another account / Create account」之外的任意账号项
+                # 优先匹配「Log in to another account / 用另一个账号 / Use another account」
                 clicked = page.evaluate(
                     """() => {
-                        const skip = ['log in to another', '另一个账号', 'create account', '创建账号',
-                                      'log out', '登出'];
-                        // 通常账号项是 li/button/a,带 email 或 +country dial
+                        const wantTexts = [
+                            'log in to another account', 'use another account',
+                            'use a different account', 'sign in to another account',
+                            'log in with another account',
+                            '使用另一个账号', '另一个账号', '其他账号', '换个账号',
+                        ];
+                        const cands = document.querySelectorAll(
+                            'button, a, li, [role="button"]'
+                        );
+                        for (const el of cands) {
+                            const r = el.getBoundingClientRect();
+                            if (r.width <= 0 || r.height <= 0) continue;
+                            const t = (el.innerText || '').trim().toLowerCase();
+                            if (!t) continue;
+                            if (wantTexts.some(w => t.includes(w))) {
+                                el.scrollIntoView({ block: 'center' });
+                                el.click();
+                                return t.slice(0, 80);
+                            }
+                        }
+                        return null;
+                    }"""
+                )
+                if clicked:
+                    logger.info("[phone-reg] picker 点中「Log in to another account」: %r",
+                                clicked)
+                    _sleep(3)
+                    last_url = url
+                    continue
+                # 兜底:找不到「另一个账号」入口,只能点已有账号(虽然会跳过 add-email)
+                logger.warning("[phone-reg] picker 没找到「Log in to another account」,"
+                               "退路:点已有账号(将跳过 add-email,账号只能 SMS reauth)")
+                clicked = page.evaluate(
+                    """() => {
+                        const skip = ['log in to another', '另一个账号', 'create account',
+                                      '创建账号', 'log out', '登出', 'sign up'];
                         const cands = document.querySelectorAll(
                             'button, a, li, [role="button"]'
                         );
@@ -2200,7 +2246,6 @@ def _phase2_oauth(
                             const t = (el.innerText || '').trim().toLowerCase();
                             if (!t || t.length > 200) continue;
                             if (skip.some(s => t.includes(s))) continue;
-                            // 含 @ 或 +数字 是账号标识
                             if (t.includes('@') || /\\+\\d{1,4}/.test(t)) {
                                 el.scrollIntoView({ block: 'center' });
                                 el.click();
@@ -2211,7 +2256,8 @@ def _phase2_oauth(
                     }"""
                 )
                 if clicked:
-                    logger.info("[phone-reg] account picker 点中: %r", clicked)
+                    logger.warning("[phone-reg] 兜底:点已有账号 %r — 注意:此号将无 email 绑定",
+                                   clicked)
                     _sleep(3)
                     last_url = url
                     continue
