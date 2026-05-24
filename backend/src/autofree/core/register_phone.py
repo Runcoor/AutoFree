@@ -344,7 +344,12 @@ def _classify_password_page(page: Page) -> str:
     except Exception:
         return "unknown"
     body_low = body.lower()
-    # 已存在账号特征(最强信号 = Forgot password 链接)
+    # ★ 最强信号:内嵌「号码已注册」警告(常见于 Create a password 页底部红字)—
+    # 必须先于 create 判,否则会误以为是新号填密码 → 点 Continue 死循环
+    for pat in PHONE_CONFLICT_PATTERNS:
+        if pat.lower() in body_low or pat in body:
+            return "existing"
+    # 已存在账号特征(Forgot password 链接 / Enter your password 标题)
     if "forgot password" in body_low or "忘记密码" in body or "找回密码" in body:
         return "existing"
     if "enter your password" in body_low or "输入你的密码" in body or "输入密码" in body:

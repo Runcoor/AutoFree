@@ -232,6 +232,32 @@ def cleanup_old_screenshots(*, days: int = 7, root: Path | None = None) -> int:
     return removed
 
 
+def clear_screenshots(*, root: Path | None = None) -> int:
+    """清空 SCREENSHOT_DIR 下所有文件 + 子目录(保留根目录本身)。返回删除文件数。
+
+    用于每个 batch 启动前 — 只保留本轮跑出的截图,不留历史包袱。"""
+    from autofree.core.config import SCREENSHOT_DIR
+    base = root or SCREENSHOT_DIR
+    if not base.exists():
+        return 0
+    removed = 0
+    for p in base.rglob("*"):
+        if p.is_file() or p.is_symlink():
+            try:
+                p.unlink()
+                removed += 1
+            except OSError:
+                pass
+    for p in sorted(base.rglob("*"), key=lambda x: len(x.parts), reverse=True):
+        if p.is_dir() and p != base:
+            try:
+                p.rmdir()
+            except OSError:
+                pass
+    logger.info("[browser] clear_screenshots 清空 %d 个旧截图", removed)
+    return removed
+
+
 def page_excerpt(page, limit: int = 240) -> str:
     try:
         return page.locator("body").inner_text(timeout=1500)[:limit].replace("\n", " ")

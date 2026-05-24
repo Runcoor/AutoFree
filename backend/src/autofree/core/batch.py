@@ -107,10 +107,11 @@ def run_batch(
     assert_configured()
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        from autofree.core.browser import cleanup_old_screenshots
-        cleanup_old_screenshots(days=7)
+        # 新一轮 batch:清空上一轮所有截图,只保留本轮跑出来的(避免 3000+ 张堆积)
+        from autofree.core.browser import clear_screenshots
+        clear_screenshots()
     except Exception:
-        logger.debug("[batch] cleanup_old_screenshots 失败(忽略)", exc_info=True)
+        logger.debug("[batch] clear_screenshots 失败(忽略)", exc_info=True)
 
     # 入口清掉上一轮残留的 stop 信号 — 否则上次按了 Stop 之后没人 reset,新 batch 一启动就被中断
     reset_stop()

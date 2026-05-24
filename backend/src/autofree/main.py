@@ -106,11 +106,8 @@ async def lifespan(app: FastAPI):
     _run_migrations()
     _ensure_phone_verified_columns()
     _reap_orphan_batches()
-    try:
-        from autofree.core.browser import cleanup_old_screenshots
-        cleanup_old_screenshots(days=7)
-    except Exception:
-        logger.exception("[bootstrap] cleanup_old_screenshots 失败(忽略)")
+    # 截图清理改由每个 batch 启动时执行(clear_screenshots),不在 bootstrap 做 —
+    # 避免用户重启服务时丢掉上一批想回看的截图
     # bootstrap 用户密码(从 .env 读 APP_PASSWORD,首启写 User 表)
     from autofree.auth.bootstrap import bootstrap_password
 
