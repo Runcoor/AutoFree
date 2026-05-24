@@ -822,10 +822,20 @@ def _back_to_phone_input(page: Page, country: PhoneCountry) -> bool:
 
 
 def _fill_phone_input(page: Page, local_number: str, full_number: str, country: PhoneCountry) -> None:
-    """填手机号:先看页面国家显示是否对,对就填本地号,不对就填完整号(不带 +)。"""
+    """填手机号:先看页面国家显示是否对,对就填本地号,不对就填完整号(不带 +)。
+
+    JS focus + keyboard.type — 绕开 React Aria 浮动 label 拦截 click。
+    """
     inp = page.locator(PHONE_INPUT_SELECTOR).first
     inp.wait_for(state="visible", timeout=15000)
-    inp.click(click_count=3)
+    # JS focus(避免 floating label overlay 拦截 click)
+    page.evaluate(
+        """() => {
+            const inp = document.querySelector('input[name="phoneNumberInput"], input[type="tel"]');
+            if (inp) inp.focus();
+        }"""
+    )
+    _sleep(0.15)
 
     # 找触发器读 current_dial — 宽松匹配:aria-haspopup / role=combobox / 含 (+XX)
     # 文本的可见 button,且不在 listbox 容器内(避免读到隐藏选项)
@@ -881,25 +891,84 @@ def _fill_phone_input(page: Page, local_number: str, full_number: str, country: 
         logger.info("[phone-reg] 国家显示 +%s 与目标 +%s 不符,填完整号 %s",
                     current_dial or "?", country.dial_code, value)
 
-    inp.fill("", timeout=3000)
+    # 清空 — Ctrl+A + Delete(不用 inp.fill 避免 actionability check 卡住)
+    try:
+        page.keyboard.press("Control+A")
+        page.keyboard.press("Delete")
+    except Exception:
+        pass
     _sleep(0.2)
     page.keyboard.type(value, delay=50)
     _sleep(0.5)
 
 
 def _fill_password_input(page: Page, password: str) -> None:
-    """填密码 — clear + type,React 兼容。"""
-    pi = page.locator(PASSWORD_INPUT_SELECTOR).first
-    pi.wait_for(state="visible", timeout=15000)
-    pi.click(click_count=3)
-    _sleep(0.15)
+    """填密码 — JS focus + 真实键盘 type,React Aria 浮动 label 兼容。
+
+    chatgpt.com create-password 页用 React Aria 浮动 label(`_typeableLabel`),
+    overlay 拦截 Playwright .click() → 30s actionability 超时把整个 phase1 拖死。
+    所以不用 click,直接 JS focus 后用 keyboard.type(NumberField 风格的 input
+    要求逐字符输入,nativeSetter 会被 React 受控组件覆盖)。
+    """
+    # 等密码 input 渲染 — 只看 DOM,不用 click 触发 actionability
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        ready = page.evaluate(
+            """() => !!document.querySelector('input[type="password"]')"""
+        )
+        if ready:
+            break
+        _sleep(0.3)
+
+    # JS focus(绕开 floating label overlay)
+    focused = page.evaluate(
+        """() => {
+            const inp = document.querySelector('input[type="password"]');
+            if (!inp) return false;
+            inp.focus();
+            return document.activeElement === inp;
+        }"""
+    )
+    if not focused:
+        logger.warning("[phone-reg] 密码输入框 focus 失败,尝试 force click 兜底")
+        try:
+            page.locator(PASSWORD_INPUT_SELECTOR).first.click(force=True, timeout=3000)
+        except Exception as exc:
+            logger.warning("[phone-reg] force click 也失败: %s — type 可能填到错位置", exc)
+    _sleep(0.2)
+
+    # 清空(Ctrl+A + Delete,比 Backspace 稳)
     try:
-        pi.press("ControlOrMeta+a", timeout=500)
-        pi.press("Backspace", timeout=500)
+        page.keyboard.press("Control+A")
+        page.keyboard.press("Delete")
     except Exception:
         pass
+
     page.keyboard.type(password, delay=30)
-    _sleep(0.3)
+    _sleep(0.4)
+
+    # 校验:读 input.value 长度,空就再试一次 force click + type
+    actual_len = page.evaluate(
+        """() => (document.querySelector('input[type="password"]') || {}).value?.length || 0"""
+    )
+    if actual_len != len(password):
+        logger.warning(
+            "[phone-reg] 密码填写校验失败 (设 %d 字符 / 实际 %d) — 重试",
+            len(password), actual_len,
+        )
+        try:
+            page.locator(PASSWORD_INPUT_SELECTOR).first.click(force=True, timeout=5000)
+            _sleep(0.2)
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Delete")
+            page.keyboard.type(password, delay=60)
+            _sleep(0.4)
+            actual_len = page.evaluate(
+                """() => (document.querySelector('input[type="password"]') || {}).value?.length || 0"""
+            )
+            logger.info("[phone-reg] 密码重试后长度=%d", actual_len)
+        except Exception as exc:
+            logger.warning("[phone-reg] 密码重试异常: %s", exc)
 
 
 def _fill_sms_code_smart(page: Page, code: str) -> bool:
@@ -925,9 +994,22 @@ def _fill_sms_code_smart(page: Page, code: str) -> bool:
                 if len(visible_cells) >= len(code):
                     logger.info("[phone-reg] SMS code 6-cell 模式 cells=%d", len(visible_cells))
                     try:
-                        for i, ch in enumerate(code):
-                            visible_cells[i].fill(ch, timeout=2000)
-                            time.sleep(0.05)
+                        # JS 模式:focus 第一格 + 顺序 type,Radix/React-Aria 的 6 格
+                        # OTP input 通常自动跳到下一格
+                        page.evaluate(
+                            """(s) => {
+                                const cells = document.querySelectorAll(s);
+                                for (const c of cells) {
+                                    const r = c.getBoundingClientRect();
+                                    if (r.width > 0 && r.height > 0) { c.focus(); return; }
+                                }
+                            }""",
+                            sel,
+                        )
+                        time.sleep(0.15)
+                        for ch in code:
+                            page.keyboard.type(ch, delay=80)
+                            time.sleep(0.1)
                         return True
                     except Exception as exc:
                         logger.warning("[phone-reg] SMS code 6-cell 失败,回退单 input: %s", exc)
@@ -935,21 +1017,33 @@ def _fill_sms_code_smart(page: Page, code: str) -> bool:
         except Exception:
             continue
 
-    # 单 input 模式
+    # 单 input 模式 — JS focus + keyboard.type(不用 .fill 避免 actionability)
     for sel in CODE_INPUT_SELECTORS:
         try:
-            el = page.locator(sel).first
-            if not el.is_visible(timeout=1500):
+            visible = page.evaluate(
+                """(s) => {
+                    const el = document.querySelector(s);
+                    if (!el) return false;
+                    const r = el.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                }""",
+                sel,
+            )
+            if not visible:
                 continue
+            page.evaluate(
+                """(s) => { const el = document.querySelector(s); if (el) el.focus(); }""",
+                sel,
+            )
+            _sleep(0.15)
             try:
-                el.fill(code, timeout=3000)
-                logger.info("[phone-reg] SMS code 单 input 模式 sel=%s", sel)
-                return True
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Delete")
             except Exception:
-                el.click(timeout=2000)
-                page.keyboard.type(code, delay=50)
-                logger.info("[phone-reg] SMS code keyboard.type 模式 sel=%s", sel)
-                return True
+                pass
+            page.keyboard.type(code, delay=50)
+            logger.info("[phone-reg] SMS code JS focus+type sel=%s", sel)
+            return True
         except Exception:
             continue
     return False
@@ -1050,6 +1144,18 @@ def _fill_about_you(page: Page, full_name: str, birth: dict[str, str]) -> None:
                 cnt = 0
             if cnt >= 3:
                 logger.info("[phone-reg] about-you 用 spinbutton 生日填写 (%d)", cnt)
+                # 旧版 spinbutton 也可能有 floating label 遮挡 — 用 force click
+                def _click_sb(sb_locator):
+                    try:
+                        sb_locator.click(force=True, timeout=3000)
+                    except Exception:
+                        # 兜底 JS focus
+                        try:
+                            handle = sb_locator.element_handle(timeout=1000)
+                            if handle:
+                                page.evaluate("(el) => el.focus()", handle)
+                        except Exception:
+                            pass
                 for i in range(cnt):
                     sb = spinbuttons.nth(i)
                     try:
@@ -1057,15 +1163,15 @@ def _fill_about_you(page: Page, full_name: str, birth: dict[str, str]) -> None:
                     except Exception:
                         label = ""
                     if "year" in label or "yyyy" in label or "年" in label:
-                        sb.click()
+                        _click_sb(sb)
                         _sleep(0.2)
                         page.keyboard.type(birth["year"], delay=60)
                     elif "month" in label or "mm" in label or "月" in label:
-                        sb.click()
+                        _click_sb(sb)
                         _sleep(0.2)
                         page.keyboard.type(birth["month"], delay=60)
                     elif "day" in label or "dd" in label or "日" in label:
-                        sb.click()
+                        _click_sb(sb)
                         _sleep(0.2)
                         page.keyboard.type(birth["day"], delay=60)
     except Exception as exc:
@@ -1922,20 +2028,47 @@ def _phase2_oauth(
             last_url = url
             continue
 
-        # 4) /add-email 邮箱绑定
+        # 4) /add-email 邮箱绑定 — JS focus + type 避开 React Aria 浮动 label 拦截
         if "add-email" in url_low or "add_email" in url_low:
             logger.info("[phone-reg] phase2 r%d /add-email,绑定 %s", round_idx, email_for_bind)
             try:
-                ei = page.locator(
-                    'input[type="email"], input[name="email"], input[name="username"], '
-                    'input[name="identifier"]',
-                ).first
-                ei.wait_for(state="visible", timeout=5000)
-                ei.click(click_count=3)
+                # 等 input 渲染
+                deadline = time.monotonic() + 5
+                ei_sel = ('input[type="email"], input[name="email"], '
+                          'input[name="username"], input[name="identifier"]')
+                ready = False
+                while time.monotonic() < deadline:
+                    if page.evaluate(f"() => !!document.querySelector('{ei_sel}')"):
+                        ready = True
+                        break
+                    _sleep(0.3)
+                if not ready:
+                    raise OAuthFailed("/add-email 找不到 email 输入框")
+                focused = page.evaluate(
+                    """(s) => {
+                        const el = document.querySelector(s);
+                        if (!el) return false;
+                        el.focus();
+                        return document.activeElement === el;
+                    }""",
+                    ei_sel,
+                )
+                if not focused:
+                    logger.warning("[phone-reg] /add-email focus 失败 — force click 兜底")
+                    page.locator(ei_sel).first.click(force=True, timeout=3000)
+                _sleep(0.2)
+                try:
+                    page.keyboard.press("Control+A")
+                    page.keyboard.press("Delete")
+                except Exception:
+                    pass
                 page.keyboard.type(email_for_bind, delay=30)
+            except OAuthFailed:
+                safe_screenshot(page, SCREENSHOT_DIR / "phone_25_add_email_no_input.png")
+                raise
             except Exception as exc:
                 safe_screenshot(page, SCREENSHOT_DIR / "phone_25_add_email_no_input.png")
-                raise OAuthFailed(f"/add-email 找不到 email 输入框: {exc}") from exc
+                raise OAuthFailed(f"/add-email 填写失败: {exc}") from exc
             _sleep(0.5)
             _click_submit_button(page)
             _sleep(4)
