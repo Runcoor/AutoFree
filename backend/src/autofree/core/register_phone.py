@@ -2391,61 +2391,69 @@ def _phase2_oauth(
             last_url = url
             continue
 
-        # 7.5) 「Welcome back / Choose an account」picker — OAuth 流程里 OpenAI
-        # 检测到已登录 session 时插入这步要求选账号。
+        # 7.5) 「Welcome back / Choose an account」picker
         #
-        # 关键:此时 picker 上列的就是 phase1 刚注册的这个 phone-only 账号
-        # (例:「NL Noah Lewis +55 (xx) xxxxxxxxx」)。
-        # 点这个卡片 = 继续这个账号的 OAuth → OpenAI 检测到该号没绑 email
-        # → 路由到 /add-email → 我们填 cloud-mail 邮箱 → 绑定成功 → callback。
+        # ⚠️ 重要更正(基于 HAR 实测):点已有账号卡片 = OAuth shortcut,
+        # **直接生成 code 跳到 callback,跳过 /add-email**。这样 CPA 拿到的
+        # auth_code 是状态不完整的,token 交换 user_error。
         #
-        # 反例:点「Log in to another account」走全新登录 — 但我们没有别的账号,
-        # 会卡死在 phone 输入页,且可能拿到 invalid auth_code 导致 token 交换
-        # 失败 (token_exchange_user_error)。所以这条只能当兜底。
+        # 正确做法(HAR 验证的成功路径):必须走 /log-in-or-create-account →
+        # /log-in/password → /add-email → /email-verification → callback。
+        # 所以 picker 出现 = 我们 cookie 清理没干净,只能尝试:
+        #   1. 点 X 按钮删除该账号卡片(消除 session 后 picker 消失)
+        #   2. 没 X 就点「Log in to another account」走 fresh login
+        # 两条路都引导 OpenAI 走完整登录流程触发 /add-email。
         try:
             body_text = page.inner_text("body", timeout=1500)[:2000]
         except Exception:
             body_text = ""
         if ("Welcome back" in body_text or "选择账号" in body_text
                 or "Choose an account" in body_text):
-            logger.info("[phone-reg] phase2 r%d Account picker (Welcome back) — "
-                        "优先点已有账号卡片(继续此账号 OAuth → 触发 /add-email)",
-                        round_idx)
+            logger.warning(
+                "[phone-reg] phase2 r%d Account picker 出现 — 说明 cookie/storage 清理没干净,"
+                "尝试删除卡片或走 fresh login 触发 /add-email",
+                round_idx,
+            )
             try:
-                # 优先点已有账号卡片(包含 @ 或 +<dial>) — OAuth 会路由到 /add-email
-                clicked = page.evaluate(
+                # 策略 A:点账号卡片旁的 × 按钮(aria-label="Remove" / 包含 close 字样)
+                # 删除该 session → picker 项消失 → 自动跳到 fresh login
+                x_clicked = page.evaluate(
                     """() => {
-                        const skip = ['log in to another', 'use another', 'use a different',
-                                      'sign in to another', '另一个账号', '其他账号', '换个账号',
-                                      'create account', '创建账号', 'log out', '登出', 'sign up',
-                                      'terms of use', 'privacy policy', '使用条款', '隐私政策'];
-                        const cands = document.querySelectorAll(
-                            'button, a, li, div[role="button"], [data-testid]'
-                        );
-                        for (const el of cands) {
-                            const r = el.getBoundingClientRect();
-                            if (r.width <= 0 || r.height <= 0) continue;
-                            const t = (el.innerText || '').trim().toLowerCase();
+                        // 找带账号卡片附近的 × / close / remove 按钮
+                        const cards = document.querySelectorAll('li, div, [data-testid]');
+                        for (const card of cards) {
+                            const t = (card.innerText || '').trim();
                             if (!t || t.length > 200) continue;
-                            if (skip.some(s => t.includes(s))) continue;
-                            // 账号卡片特征:含邮箱 @ 或国际电话 +<digits>
-                            if (t.includes('@') || /\\+\\d{1,4}/.test(t)) {
-                                el.scrollIntoView({ block: 'center' });
-                                el.click();
-                                return t.slice(0, 80);
+                            if (!t.includes('@') && !/\\+\\d{1,4}/.test(t)) continue;
+                            // 这卡片里找 × 按钮
+                            const xBtns = card.querySelectorAll('button, [role="button"], svg, [aria-label]');
+                            for (const x of xBtns) {
+                                const al = (x.getAttribute('aria-label') || '').toLowerCase();
+                                const tx = (x.innerText || '').trim();
+                                if (al.includes('remove') || al.includes('delete') || al.includes('close') ||
+                                    al.includes('删除') || al.includes('移除') ||
+                                    tx === '×' || tx === '✕' || tx === 'X') {
+                                    const r = x.getBoundingClientRect();
+                                    if (r.width > 0 && r.height > 0) {
+                                        x.scrollIntoView({block: 'center'});
+                                        x.click();
+                                        return (al || tx || '×').slice(0, 40);
+                                    }
+                                }
                             }
                         }
                         return null;
                     }"""
                 )
-                if clicked:
-                    logger.info("[phone-reg] picker 点中已有账号卡片: %r — 等待 /add-email",
-                                clicked)
+                if x_clicked:
+                    logger.info("[phone-reg] picker 点中 × 删除卡片: %r — 等 picker 消失",
+                                x_clicked)
                     _sleep(3)
                     last_url = url
                     continue
-                # 兜底:找不到账号卡片,只能走「Log in to another account」
-                logger.warning("[phone-reg] picker 没找到账号卡片,兜底点「Log in to another account」")
+
+                # 策略 B:点「Log in to another account」走 fresh login
+                logger.warning("[phone-reg] picker 找不到 × 按钮,改点「Log in to another account」")
                 clicked = page.evaluate(
                     """() => {
                         const wantTexts = [
@@ -2471,12 +2479,17 @@ def _phase2_oauth(
                     }"""
                 )
                 if clicked:
-                    logger.warning("[phone-reg] 兜底点中: %r", clicked)
+                    logger.info("[phone-reg] picker 点中: %r — 走 fresh login", clicked)
                     _sleep(3)
                     last_url = url
                     continue
+
+                logger.error(
+                    "[phone-reg] picker 处理失败:× 按钮 + Log in to another 都没找到 — "
+                    "OAuth 大概率会撞 shortcut 跳过 /add-email"
+                )
             except Exception as exc:
-                logger.warning("[phone-reg] account picker 点击异常: %s", exc)
+                logger.warning("[phone-reg] account picker 处理异常: %s", exc)
 
         # 8) consent 页面:点 Allow/Continue
         if "/consent" in url_low or "/authorize" in url_low:
