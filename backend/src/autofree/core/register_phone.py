@@ -959,55 +959,88 @@ def _fill_about_you(page: Page, full_name: str, birth: dict[str, str]) -> None:
     """填 about-you(姓名 + 年龄/生日)— 复刻 register.py 已有逻辑。
 
     注意:chatgpt.com 新版用 React Aria 的浮动 label(`_typeableLabel`),
-    label 浮在 input 上方会拦截 click 事件。所以填值不用 Playwright .click(),
-    而是用 JS nativeSetter 直接设 value + dispatch input/change 通知 React
-    受控组件,完全绕开 actionability 检查。
+    label 浮在 input 上方会拦截 Playwright 的 .click()。也注意 React Aria
+    NumberField 跟纯 JS nativeSetter 不兼容(setter 把 "22" 设上去后,
+    NumberField 的 onChange 把多位数当步进处理,最后只剩个位数)。
+    所以策略是:JS focus(绕开 click 拦截)+ 真实键盘 type(NumberField 逐
+    字符正确处理)。
     """
     _sleep(2)
 
-    def _js_set_value(selector: str, value: str) -> bool:
-        return page.evaluate(
-            """(args) => {
-                const { sel, v } = args;
+    def _focus_and_type(selector: str, value: str) -> bool:
+        """JS focus + 键盘 type,绕开浮动 label,兼容 React Aria NumberField。"""
+        focused = page.evaluate(
+            """(sel) => {
                 const inp = document.querySelector(sel);
                 if (!inp) return false;
-                try { inp.focus(); } catch (e) {}
-                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-                setter.call(inp, v);
-                inp.dispatchEvent(new Event('input', { bubbles: true }));
-                inp.dispatchEvent(new Event('change', { bubbles: true }));
-                try { inp.blur(); } catch (e) {}
-                return true;
+                inp.focus();
+                return document.activeElement === inp;
             }""",
-            {"sel": selector, "v": value},
+            selector,
         )
+        if not focused:
+            return False
+        _sleep(0.2)
+        # 清空 — Ctrl+A 全选 + Delete,比逐字 Backspace 稳
+        try:
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Delete")
+        except Exception:
+            pass
+        page.keyboard.type(value, delay=50)
+        _sleep(0.3)
+        return True
 
-    # 1) 姓名 — 跳过 click,直接 JS 设值
+    # 1) 姓名 — JS focus + type(绕开 React Aria 浮动 label)
     try:
-        name_set = _js_set_value('input[name="name"]', full_name)
-        if not name_set:
-            # 退路:其它选择器
-            for sel in ('input[autocomplete="name"]',
-                        'input[placeholder*="name" i]',
-                        'input[placeholder*="姓名"]'):
-                if _js_set_value(sel, full_name):
-                    name_set = True
-                    break
-        if name_set:
-            logger.info("[phone-reg] about-you 姓名: %s (JS 设值)", full_name)
+        for sel in ('input[name="name"]',
+                    'input[autocomplete="name"]',
+                    'input[placeholder*="name" i]',
+                    'input[placeholder*="姓名"]'):
+            if _focus_and_type(sel, full_name):
+                logger.info("[phone-reg] about-you 姓名: %s (focus+type via %s)",
+                            full_name, sel)
+                break
     except Exception as exc:
         logger.debug("[phone-reg] 姓名填写失败: %s", exc)
 
-    # 2) 年龄(新版)或生日 3 段(旧版 spinbutton)
+    # 2) 年龄(新版 React Aria NumberField)或生日 3 段(旧版 spinbutton)
     age_str = str(int(time.strftime("%Y")) - int(birth["year"]))
     try:
-        # 先看 age input 是否存在(不用 click,只看 DOM)
+        # 先看 age input 是否存在(不 click,只看 DOM)
         age_exists = page.evaluate(
             """() => !!document.querySelector('input[name="age"]')"""
         )
         if age_exists:
-            ok = _js_set_value('input[name="age"]', age_str)
-            logger.info("[phone-reg] about-you 年龄: %s (JS 设值 ok=%s)", age_str, ok)
+            ok = _focus_and_type('input[name="age"]', age_str)
+            # 校验实际值 — 如果 NumberField 把值改了(比如步进 bug),抓回来看看
+            actual = page.evaluate(
+                """() => (document.querySelector('input[name="age"]') || {}).value || ''"""
+            )
+            logger.info("[phone-reg] about-you 年龄: 设 %s 实际 %r (ok=%s)",
+                        age_str, actual, ok)
+            if str(actual) != age_str:
+                # 再试一次:JS 完全清空 + 逐字符 type
+                try:
+                    page.evaluate(
+                        """() => {
+                            const inp = document.querySelector('input[name="age"]');
+                            if (!inp) return;
+                            inp.focus();
+                            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                            setter.call(inp, '');
+                            inp.dispatchEvent(new Event('input', { bubbles: true }));
+                        }"""
+                    )
+                    _sleep(0.2)
+                    page.keyboard.type(age_str, delay=120)
+                    _sleep(0.3)
+                    actual2 = page.evaluate(
+                        """() => (document.querySelector('input[name="age"]') || {}).value || ''"""
+                    )
+                    logger.info("[phone-reg] about-you 年龄重试后: %r", actual2)
+                except Exception as exc:
+                    logger.warning("[phone-reg] 年龄重试异常: %s", exc)
         else:
             # 旧版 spinbutton — 按 aria-label 识别(年/月/日 或 year/month/day)
             spinbuttons = page.locator('[role="spinbutton"]')
