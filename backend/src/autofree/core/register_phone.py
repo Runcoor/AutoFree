@@ -399,19 +399,157 @@ def _select_country(page: Page, country: PhoneCountry) -> bool:
         logger.info("[phone-reg] 国家已是 select:%s", sel_already)
         return True
 
-    # 检测 UI 类型
+    # 检测 UI 类型 — 注意顺序:Radix combobox 优先,因为它没有底层 <select>,
+    # 也没有 aria-haspopup=listbox(用 role=combobox)
     ui_type = page.evaluate(
         """() => {
+            // Radix UI Select: role=combobox + aria-controls=radix-XXX
+            const radixBtn = Array.from(document.querySelectorAll('[role="combobox"]')).find(
+                b => /\\+\\d/.test(b.innerText || '') || /country/i.test(b.getAttribute('aria-label') || '')
+            );
+            if (radixBtn) return 'radix-combobox';
+            // 旧版 React Aria: button + aria-haspopup=listbox
             const hasBtn = Array.from(document.querySelectorAll('button')).some(
                 b => b.getAttribute('aria-haspopup') === 'listbox' && /\\+\\d/.test(b.innerText || '')
             );
-            const hasSelect = !!document.querySelector('select');
             if (hasBtn) return 'react-aria';
+            const hasSelect = !!document.querySelector('select');
             if (hasSelect) return 'native';
             return 'unknown';
         }"""
     )
     logger.info("[phone-reg] 国家选择器 UI=%s 目标 iso=%s dial=%s", ui_type, iso, dial)
+
+    # 英文国家名(用于 listbox 文本匹配 / 键盘搜索) — PhoneCountry 用 en_aliases tuple
+    en_name = (country.en_aliases[0] if country.en_aliases else country.cn_name) or ""
+
+    # ── Radix UI Select(chatgpt.com 新版常见,role=combobox + portal listbox)──
+    if ui_type == "radix-combobox":
+        try:
+            # 1. 点开下拉
+            btn_box = page.evaluate(
+                """() => {
+                    const b = Array.from(document.querySelectorAll('[role="combobox"]')).find(
+                        x => /\\+\\d/.test(x.innerText || '') || /country/i.test(x.getAttribute('aria-label') || '')
+                    );
+                    if (!b) return null;
+                    const r = b.getBoundingClientRect();
+                    return { x: r.x + r.width/2, y: r.y + r.height/2 };
+                }"""
+            )
+            if not btn_box:
+                logger.warning("[phone-reg] Radix combobox 按钮坐标取不到")
+            else:
+                page.mouse.click(btn_box["x"], btn_box["y"])
+                _sleep(1.5)
+                # 2. 等 listbox 出现 — Radix 通常 portal 到 body
+                listbox_ready = page.evaluate(
+                    """() => !!document.querySelector('[role="listbox"]')"""
+                )
+                if not listbox_ready:
+                    logger.warning("[phone-reg] Radix 下拉 1.5s 内没出现 listbox")
+                else:
+                    # 3. 在 listbox 里找目标 option — Radix option 用 role=option
+                    # 文本通常类似 "Brazil +55" / "Brazil (+55)" / "Brazil"
+                    # 尝试多种文本匹配
+                    target = page.evaluate(
+                        """(args) => {
+                            const { iso, dial, name } = args;
+                            const opts = document.querySelectorAll('[role="option"]');
+                            for (const o of opts) {
+                                const t = (o.innerText || '').trim();
+                                // 优先精确匹配国家名 + dial 组合
+                                if (name && t.includes(name) && t.includes(dial)) return { idx: o.dataset.index || -1, text: t, found: true };
+                            }
+                            for (const o of opts) {
+                                const t = (o.innerText || '').trim();
+                                if (t.includes(`+${dial}`) || t.includes(`(${dial})`) || t.includes(`(+${dial})`)) {
+                                    // 进一步确认是目标国家:看 data-value / data-key 是否匹配 iso
+                                    const dv = o.getAttribute('data-value') || o.getAttribute('data-key') || '';
+                                    if (!dv || dv.toUpperCase() === iso.toUpperCase() || t.toLowerCase().includes(name.toLowerCase())) {
+                                        return { idx: -1, text: t, found: true };
+                                    }
+                                }
+                            }
+                            return { found: false, total: opts.length };
+                        }""",
+                        {"iso": iso, "dial": dial, "name": en_name.strip()},
+                    )
+                    logger.info("[phone-reg] Radix listbox 目标搜索: %s", target)
+                    if target.get("found"):
+                        # 4. 滚动 + 点击。Radix listbox 通常 virtualized,需要把目标 scroll 进视区
+                        # 先尝试 keyboard: 输入国家名首字母 / 全名(combobox 通常支持类型搜索)
+                        # 简化做法:遍历点击直到找到可见的目标
+                        clicked = page.evaluate(
+                            """(args) => {
+                                const { iso, dial, name } = args;
+                                const opts = document.querySelectorAll('[role="option"]');
+                                for (const o of opts) {
+                                    const t = (o.innerText || '').trim();
+                                    const dv = (o.getAttribute('data-value') || o.getAttribute('data-key') || '').toUpperCase();
+                                    const isTarget = (dv === iso.toUpperCase()) ||
+                                        (name && t.includes(name) && (t.includes(`+${dial}`) || t.includes(`(${dial})`))) ||
+                                        (t === `${name} +${dial}` || t === `${name} (+${dial})`);
+                                    if (isTarget) {
+                                        o.scrollIntoView({ block: 'center' });
+                                        o.click();
+                                        return t;
+                                    }
+                                }
+                                return null;
+                            }""",
+                            {"iso": iso, "dial": dial, "name": en_name.strip()},
+                        )
+                        if clicked:
+                            _sleep(0.8)
+                            logger.info("[phone-reg] Radix combobox 选择成功: %s", clicked)
+                            return True
+                        logger.warning("[phone-reg] Radix listbox 找到目标但点击失败")
+                    else:
+                        # 没找到:可能列表很长 + virtualized + 不在 DOM 里。试键盘输入搜索
+                        logger.info("[phone-reg] Radix listbox 直接遍历未中,试键盘输入国家名搜索 (total=%s)",
+                                    target.get("total"))
+                        try:
+                            type_name = en_name.strip()
+                            if type_name:
+                                page.keyboard.type(type_name, delay=80)
+                                _sleep(1.0)
+                                clicked = page.evaluate(
+                                    """(args) => {
+                                        const { iso, dial, name } = args;
+                                        // 输入后 listbox 通常只剩匹配项,取第一个 role=option 点
+                                        const opts = document.querySelectorAll('[role="option"]');
+                                        for (const o of opts) {
+                                            const t = (o.innerText || '').trim();
+                                            if (name && t.toLowerCase().startsWith(name.toLowerCase())) {
+                                                o.scrollIntoView({ block: 'center' });
+                                                o.click();
+                                                return t;
+                                            }
+                                        }
+                                        // 都没匹配,点第一个
+                                        if (opts.length > 0) {
+                                            opts[0].scrollIntoView({ block: 'center' });
+                                            opts[0].click();
+                                            return (opts[0].innerText || '').trim();
+                                        }
+                                        return null;
+                                    }""",
+                                    {"iso": iso, "dial": dial, "name": type_name},
+                                )
+                                if clicked:
+                                    _sleep(0.8)
+                                    logger.info("[phone-reg] Radix combobox 键盘搜索+点击成功: %s", clicked)
+                                    return True
+                        except Exception as exc:
+                            logger.warning("[phone-reg] Radix 键盘搜索异常: %s", exc)
+                    # 关闭下拉避免污染后续步骤
+                    try:
+                        page.keyboard.press("Escape")
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.warning("[phone-reg] Radix combobox 选择异常: %s", exc)
 
     # ── React Aria(auth.openai.com 登录页常见)──
     if ui_type == "react-aria":
