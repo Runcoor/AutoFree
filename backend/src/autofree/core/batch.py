@@ -190,6 +190,24 @@ def run_batch(
                 try: mail.delete_email(address_id)
                 except Exception: pass
 
+        def _sync_phase15_email_from_exc(exc) -> None:
+            """phase 1.5 内部换过邮箱时,新邮箱/id 挂在 exc 上 — 同步到本地变量。
+            老邮箱已在 phase 1.5 内被删,这里要让 pending / _emit / _drop_email 用新的。
+            """
+            nonlocal email, address_id
+            new_email = (getattr(exc, "bound_email", "") or "").strip()
+            new_addr_id = getattr(exc, "bound_address_id", None)
+            if new_email and new_email != email:
+                logger.info(
+                    "[batch] (%d/%d) phase1.5 换过邮箱 %s -> %s,同步本地",
+                    i, count, email, new_email,
+                )
+                email = new_email
+                if new_addr_id:
+                    address_id = new_addr_id
+                record["email"] = email
+                record["domain"] = email.split("@", 1)[1] if "@" in email else current_domain
+
         try:
             current_domain = pick_domain()
             address_id, email = mail.create_email(domain=current_domain)
@@ -206,7 +224,8 @@ def run_batch(
                 t0 = time.time()
                 try:
                     bundle = register_phone_and_fetch_bundle(
-                        email=email, password=password, mail_client=mail,
+                        email=email, address_id=address_id,
+                        password=password, mail_client=mail,
                     )
                 except (RegisterFailed, RegisterBlocked):
                     # Phase 1 失败:OpenAI 上还没账号,email 没被绑过 → 安全 drop
@@ -215,6 +234,21 @@ def run_batch(
                     # Phase 2 失败:Phase 1 已完成(OpenAI 上账号已建),写 pending
                     register_done = True
                     raise
+                # phase 1.5 若换过邮箱:bundle["email"] 是真正绑的,bundle["bound_address_id"]
+                # 是新 cloud-mail id。老 address_id/email 已在 phase 1.5 内删掉(节省配额),
+                # 这里同步本地变量,让后续 _emit / append_account_line / record 用新邮箱。
+                actual_email = (bundle.get("email") or "").strip()
+                actual_addr_id = bundle.get("bound_address_id")
+                if actual_email and actual_email != email:
+                    logger.info(
+                        "[batch] (%d/%d) phase1.5 换过邮箱 %s -> %s,同步本地状态",
+                        i, count, email, actual_email,
+                    )
+                    email = actual_email
+                    if actual_addr_id:
+                        address_id = actual_addr_id
+                    record["email"] = email
+                    record["domain"] = email.split("@", 1)[1] if "@" in email else current_domain
                 register_secs = time.time() - t0
                 oauth_secs = 0.0  # phone 路径 OAuth 时间合并在 register_secs
                 register_done = True
@@ -300,6 +334,7 @@ def run_batch(
                 logger.warning("[batch] (%d/%d) accounts.txt 追加失败(忽略): %s", i, count, exc)
 
         except RegisterBlocked as exc:
+            _sync_phase15_email_from_exc(exc)
             kind = "phone" if exc.is_phone else "duplicate" if exc.is_duplicate else "blocked"
             phone_paid = bool(getattr(exc, "phone_paid_via_sms", False))
             exc_phone = (getattr(exc, "phone_e164", "") or "").strip()
@@ -322,6 +357,7 @@ def run_batch(
             else:
                 _drop_email()
         except RegisterFailed as exc:
+            _sync_phase15_email_from_exc(exc)
             exc_phone = (getattr(exc, "phone_e164", "") or "").strip()
             record["error"] = f"register_failed: {exc}"
             record["error_kind"] = "register"
@@ -336,6 +372,7 @@ def run_batch(
                                    "register_done": register_done})
             _drop_email()
         except AccountDeactivated as exc:
+            _sync_phase15_email_from_exc(exc)
             # 终结性:号已被 OpenAI 停用,reauth 无意义。不写 pending,标记 error_kind=deactivated。
             phone_paid = bool(getattr(exc, "phone_paid_via_sms", False))
             exc_phone = (getattr(exc, "phone_e164", "") or "").strip()
@@ -353,6 +390,7 @@ def run_batch(
                                    "phone_e164": exc_phone,
                                    "register_done": register_done})
         except OAuthFailed as exc:
+            _sync_phase15_email_from_exc(exc)
             phone_paid = bool(getattr(exc, "phone_paid_via_sms", False))
             exc_phone = (getattr(exc, "phone_e164", "") or "").strip()
             record["error"] = f"oauth_failed: {exc}"
@@ -373,6 +411,7 @@ def run_batch(
                 _to_pending("oauth", str(exc), phone_paid=phone_paid, phone_e164=exc_phone)
             # OAuthFailed 必然 register_done=True (fetch_personal_bundle 才会抛),无 else
         except BatchStopped as exc:
+            _sync_phase15_email_from_exc(exc)
             # 用户中断 — 当前账号记 stopped;若已注册成功也写 pending(可后续手动 OAuth)
             phone_paid = bool(getattr(exc, "phone_paid_via_sms", False))
             exc_phone = (getattr(exc, "phone_e164", "") or "").strip()
@@ -399,6 +438,7 @@ def run_batch(
             _emit("stopped", {"index": i, "total": count, "reason": "stop_during_account"})
             break
         except Exception as exc:
+            _sync_phase15_email_from_exc(exc)
             phone_paid = bool(getattr(exc, "phone_paid_via_sms", False))
             exc_phone = (getattr(exc, "phone_e164", "") or "").strip()
             record["error"] = f"unexpected: {exc}"
