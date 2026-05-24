@@ -233,30 +233,21 @@ def run_batch(
                 )
                 oauth_secs = time.time() - t1
 
-            via_cpa = bool(bundle.get("via_cpa"))
+            # phone-reg 与 email-reg 现在走完全相同的尾巴:
+            # 自换 token → bundle 有 access_token → write_auth_json → push_auth_file
+            # 1) 写 auth.json — token 权威备份
+            auth_path = write_auth_json(bundle, output_dir=batch_dir)
 
-            if via_cpa:
-                # CPA OAuth 模式:CPA 已收 callback URL 并自己换 token,本地没 token
-                # → 不写 auth.json,不调 push_auth_file(CPA 已有)
-                auth_path = None  # type: ignore[assignment]
-                cpa_ok = True
-                cpa_msg = "CPA OAuth 模式:callback 已回填,CPA 自换 token"
-                logger.info("[batch] (%d/%d) CPA OAuth 已完成:%s", i, count, cpa_msg)
-            else:
-                # AutoFree PKCE 模式:本地有 token,写 auth.json 再 push 到 CPA
-                # 1) 写 auth.json — token 权威备份
-                auth_path = write_auth_json(bundle, output_dir=batch_dir)
-
-                # 2) CPA push 包 try/except — push 失败也不丢号
-                cpa_ok = False
-                cpa_msg = ""
-                try:
-                    from autofree.core.cpa_push import push_auth_file
-                    cpa_ok, cpa_msg = push_auth_file(auth_path)
-                    logger.info("[batch] (%d/%d) CPA push: %s", i, count, cpa_msg)
-                except Exception as exc:
-                    cpa_msg = f"CPA push 异常: {exc}"
-                    logger.exception("[batch] (%d/%d) CPA push 抛异常,继续插 DB", i, count)
+            # 2) CPA push 包 try/except — push 失败也不丢号
+            cpa_ok = False
+            cpa_msg = ""
+            try:
+                from autofree.core.cpa_push import push_auth_file
+                cpa_ok, cpa_msg = push_auth_file(auth_path)
+                logger.info("[batch] (%d/%d) CPA push: %s", i, count, cpa_msg)
+            except Exception as exc:
+                cpa_msg = f"CPA push 异常: {exc}"
+                logger.exception("[batch] (%d/%d) CPA push 抛异常,继续插 DB", i, count)
 
             record.update({
                 "ok": True,
@@ -267,12 +258,12 @@ def run_batch(
                 "oauth_secs": round(oauth_secs, 1),
                 "cpa_pushed": cpa_ok,
                 "cpa_msg": cpa_msg,
-                "via_cpa": via_cpa,
+                "via_cpa": False,
             })
             ok_count += 1
-            logger.info("[batch] (%d/%d) ✅ %s plan=%s acct=%s via_cpa=%s",
+            logger.info("[batch] (%d/%d) ✅ %s plan=%s acct=%s",
                         i, count, email, bundle.get("plan_type"),
-                        bundle.get("account_id"), via_cpa)
+                        bundle.get("account_id"))
             # 3) emit → DB 持久化(_persist_account 在 progress_cb 里跑)
             _emit("account_done", {
                 **idx_info, "ok": True, "email": email,
@@ -294,8 +285,6 @@ def run_batch(
                 # 是否已绑邮箱:email-reg 永远 True;phone-reg + /add-email 成功才 True
                 # bundle.get("email_bound") 缺省 None → email-reg 默认 True;phone-reg 显式赋值
                 "email_bound": True if bundle.get("email_bound") is None else bool(bundle.get("email_bound")),
-                # CPA OAuth 模式标记 — _persist_account 据此跳过本地 token 持久化
-                "via_cpa": via_cpa,
             })
 
             # 4) accounts.txt 追加 — 失败也不丢号(token 已落 auth.json + DB + CPA)

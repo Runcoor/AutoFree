@@ -146,14 +146,12 @@ def _persist_account(info: dict, *, domain: str | None = None) -> None:
                 phone_verified = bool(info.get("phone_verified"))
                 # email_bound:email-reg 默认 True;phone-reg 显式由 register_phone 设
                 email_bound = True if info.get("email_bound") is None else bool(info.get("email_bound"))
-                via_cpa = bool(info.get("via_cpa"))
                 a = Account(
                     batch_id=info.get("batch_id", ""),
                     email=email,
                     password=info.get("password") or "",
                     account_id=info.get("account_id", ""),
                     plan_type=info.get("plan_type", "free") or "free",
-                    # via_cpa 模式:token 在 CPA,本地空串。其他模式正常存
                     access_token=info.get("access_token", ""),
                     refresh_token=info.get("refresh_token", ""),
                     id_token=info.get("id_token", ""),
@@ -169,11 +167,6 @@ def _persist_account(info: dict, *, domain: str | None = None) -> None:
                     email_bound=email_bound,
                 )
                 db.add(a)
-                if via_cpa:
-                    logger.info(
-                        "[persist] ✅ Account %s 已创建(via_cpa=True;token 由 CPA 持有,本地无 auth.json)",
-                        email,
-                    )
                 if not email_bound:
                     logger.warning(
                         "[persist] ⚠️ Account %s 创建时未绑邮箱 (phone=%s) — 需手动补绑",

@@ -2581,14 +2581,15 @@ def register_phone_and_fetch_bundle(
       password   — 设给账号的密码(可能 phase2 不用,但 phase1 必填)
       mail_client — cloud-mail 客户端(收 add-email 后的 OTP)
 
-    返回 bundle:
-      AutoFree PKCE 模式(CPA 未配):
-        {access_token, refresh_token, id_token, account_id, email, plan_type,
-         expires_at, phone_verified=True, phone, email_bound, via_cpa=False}
-      CPA OAuth 模式(CPA 已配):
-        {email, phone, phone_verified=True, email_bound, via_cpa=True,
-         cpa_state, cpa_callback_url}
-        — 没有 access_token / refresh_token,CPA 自己用 PKCE verifier 换 token
+    返回 bundle(标准格式,跟 email-reg 一致):
+      {access_token, refresh_token, id_token, account_id, email, plan_type,
+       expires_at, phone_verified=True, phone, email_bound, via_cpa=False}
+
+    OAuth 实现:
+      自生 PKCE verifier/challenge/state → 浏览器跑 OAuth → 自己用 verifier+code
+      换 token → 跟 email-reg 走同一条 write_auth_json + push_auth_file 路径。
+      历史上有走「找 CPA 取 auth_url + 回填 CPA」的路径,因 OpenAI picker
+      shortcut 改 state 导致 CPA 404,已彻底删除。
 
     SMS 配置(provider/country/operator/service)从 DB Setting 表读 — 跟 oauth.py
     走 phone gate 时是同一套 active provider。
@@ -2604,33 +2605,20 @@ def register_phone_and_fetch_bundle(
 
     country = from_sms_slug(sms_cfg.get("country", ""))
 
-    # ── 决定 OAuth 走哪条路径 ──
-    # 1) CPA 配置可用 → 走 CPA OAuth(用 CPA 的 PKCE,callback 回填 CPA,AutoFree 不存 token)
-    # 2) CPA 没配 → 走 AutoFree PKCE(老路径,本地存 token,后续 cpa_push)
-    # CPA 的 state TTL 很短(5min 左右),phase1 注册要花 3-5min,如果在开头取 auth_url
-    # 到 phase2 时 state 已过期 → 回填 CPA 返 404 "unknown or expired state"。
-    # 所以 CPA 模式只在开头**决定**走哪条路径,真正的 auth_url 拖到 phase1 完成后再取。
-    from autofree.core.cpa_sync import is_cpa_configured
-
-    use_cpa_oauth = is_cpa_configured()
-    cpa_state = ""
-
-    # AutoFree PKCE 模式提前生成 auth_url(state 不会过期);CPA 模式占位,phase1 后取
-    if not use_cpa_oauth:
-        code_verifier, code_challenge = _pkce()
-        state = secrets.token_urlsafe(16)
-        auth_url = _build_auth_url(code_challenge, state)
-        logger.info("[phone-reg] === AutoFree PKCE 模式 === state=%s redirect=%s",
-                    state[:8], CODEX_REDIRECT_URI)
-    else:
-        auth_url = ""  # phase1 之后再向 CPA 取
-        code_verifier = ""  # CPA 模式我们不持 verifier
-        logger.info("[phone-reg] === CPA OAuth 模式 === auth_url 将在 phase1 完成后再取(避免 state 过期)")
+    # OAuth:永远自生 PKCE(verifier+challenge+state)。token 自己换,
+    # auth.json 走跟 email-reg 一样的 /v0/management/auth-files 文件上传路径。
+    # 不再走 CPA 的 /codex-auth-url + /oauth-callback(state 校验路径)— 那条路
+    # 在 picker shortcut 出现时必 404,且 CPA 那边 state TTL 短,phase2 拉得久也会过期。
+    code_verifier, code_challenge = _pkce()
+    state = secrets.token_urlsafe(16)
+    auth_url = _build_auth_url(code_challenge, state)
+    logger.info("[phone-reg] === AutoFree PKCE === state=%s redirect=%s",
+                state[:8], CODEX_REDIRECT_URI)
 
     logger.info(
-        "[phone-reg] 启动 email=%s provider=%s sms_country=%s phone_country=ISO=%s dial=+%s mode=%s",
+        "[phone-reg] 启动 email=%s provider=%s sms_country=%s phone_country=ISO=%s dial=+%s",
         email, sms_provider.PROVIDER_NAME, sms_cfg.get("country"),
-        country.iso_code, country.dial_code, "cpa" if use_cpa_oauth else "autofree",
+        country.iso_code, country.dial_code,
     )
 
     # 身份资料
@@ -2646,7 +2634,6 @@ def register_phone_and_fetch_bundle(
         logger.info("[phone-reg] 使用代理 session=%s", proxy_session_id)
 
     auth_code: list[str | None] = [None]
-    full_callback_url: list[str | None] = [None]  # CPA 模式要用完整 URL
     order = None
     phone_e164 = ""
     finished_committed = False
@@ -2670,7 +2657,6 @@ def register_phone_and_fetch_bundle(
             c = qs.get("code", [None])[0]
             if c:
                 auth_code[0] = c
-                full_callback_url[0] = u  # 完整 URL — CPA 模式回填给 CPA
                 logger.info("[phone-reg] 捕获 auth_code (%s) url=%s", source, u[:120])
                 return True
             return False
@@ -2698,17 +2684,6 @@ def register_phone_and_fetch_bundle(
             order, phone_e164 = _phase1_signup(
                 page, sms_provider, sms_cfg, country, password, full_name, birth,
             )
-
-            # CPA 模式:phase1 完成后才向 CPA 取 auth_url,缩短 state 持有时间到 phase2 内
-            if use_cpa_oauth:
-                from autofree.core.cpa_sync import get_codex_auth_url
-                ok, payload = get_codex_auth_url()
-                if not ok or not isinstance(payload, dict):
-                    raise OAuthFailed(f"CPA /codex-auth-url 取 URL 失败: {payload}")
-                auth_url = payload["url"]
-                cpa_state = payload["state"]
-                logger.info("[phone-reg] phase1 完成,刚向 CPA 取到新 auth_url state=%s",
-                            cpa_state[:8])
 
             # ─── Phase 1 → Phase 2 切换:重建 browser context ───
             # Phase1 注册 chatgpt.com 留下了 cookies / localStorage / IndexedDB / Service
@@ -2749,76 +2724,7 @@ def register_phone_and_fetch_bundle(
             # 给 OpenAI 后端时间 finalize auth_code
             time.sleep(1.5)
 
-            if use_cpa_oauth:
-                # ── CPA OAuth 模式 ── 把完整 callback URL 回填给 CPA,让 CPA 自己换 token
-                from autofree.core.cpa_sync import submit_oauth_callback
-                callback_url = full_callback_url[0] or ""
-                if not callback_url:
-                    raise OAuthFailed("CPA 模式但 full_callback_url 为空")
-
-                # 校验 state 是否匹配 — picker shortcut 可能让 OpenAI 内部重启 OAuth
-                # 生成新 state,跟我们从 CPA 拿的 state 不一致 → CPA 报 "unknown state"
-                cb_qs = urllib.parse.parse_qs(urllib.parse.urlparse(callback_url).query)
-                cb_state = cb_qs.get("state", [""])[0]
-                cb_code = cb_qs.get("code", [""])[0]
-                state_match = (cb_state == cpa_state)
-                logger.info(
-                    "[phone-reg] CPA callback 诊断:期望 state=%s | 实际 state=%s | match=%s | code=%s",
-                    cpa_state[:12], cb_state[:12], state_match, cb_code[:12] + "...",
-                )
-                if not state_match:
-                    logger.error(
-                        "[phone-reg] ❌ state 不匹配!OpenAI 走了 picker shortcut 重启 OAuth,"
-                        "用了新 state %s 不是 CPA 的 %s。说明 cookies/storage 清理不彻底,"
-                        "picker 仍然出现并被点击。",
-                        cb_state[:12], cpa_state[:12],
-                    )
-
-                logger.info("[phone-reg] 回填 callback URL 给 CPA url=%s",
-                            callback_url[:150])
-                ok_post, msg_post = submit_oauth_callback(callback_url)
-                if not ok_post:
-                    if not state_match:
-                        raise OAuthFailed(
-                            f"回填 CPA 失败:state 不匹配(OAuth 被 picker shortcut 重启)— "
-                            f"CPA: {msg_post}"
-                        )
-                    if "expired" in msg_post.lower() or "404" in msg_post:
-                        logger.error(
-                            "[phone-reg] CPA state 真的过期(state 匹配但 CPA 说 expired)— "
-                            "整个 phase2 花了 >CPA 的 state TTL。让 CPA 延长 TTL 或让 phase2 更快。"
-                        )
-                    raise OAuthFailed(f"回填 CPA /oauth-callback 失败: {msg_post}")
-                logger.info("[phone-reg] ✅ CPA 已收 callback: %s", msg_post)
-
-                # 提交 SMS 订单(确认扣费)
-                try:
-                    sms_provider.finish_order(order.id)
-                    finished_committed = True
-                    logger.info("[phone-reg] ✅ CPA 模式全流程成功 sms order=%d finish_order 提交",
-                                order.id)
-                except Exception as exc:
-                    logger.warning("[phone-reg] finish_order 失败(callback 已回填,不影响): %s", exc)
-
-                # 返回不含 token 的 bundle(CPA 独占 token)
-                return {
-                    "email": email,
-                    "phone": phone_e164,
-                    "phone_verified": True,
-                    "email_bound": bool(email_bound),
-                    "via_cpa": True,
-                    "cpa_state": cpa_state,
-                    "cpa_callback_url": callback_url,
-                    # token / id_token / expires_at / account_id 都没有,CPA 那边有
-                    "access_token": "",
-                    "refresh_token": "",
-                    "id_token": "",
-                    "account_id": "",
-                    "plan_type": "free",
-                    "expires_at": None,
-                }
-
-            # ── AutoFree PKCE 模式 ── 自己换 token
+            # 自己换 token(verifier 在我们手里,跟 CPA state 无关)
             bundle = _exchange_code(auth_code[0], code_verifier, fallback_email=email)
             bundle["phone_verified"] = True
             bundle["phone"] = phone_e164
