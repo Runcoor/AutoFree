@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Search, Download, Copy, Eye, EyeOff, ExternalLink, Check, Clock, AlertCircle, Sparkles, Cloud, RefreshCw, ChevronLeft, ChevronRight, Users, KeyRound, UserPlus, X } from 'lucide-react'
+import { Search, Download, Copy, Eye, EyeOff, ExternalLink, Check, Clock, AlertCircle, Sparkles, Cloud, RefreshCw, ChevronLeft, ChevronRight, Users, KeyRound, UserPlus, X, MailWarning } from 'lucide-react'
 import { accountsApi, freegenApi, type Account, type FreegenStatus } from '../api/endpoints'
 import { Button, Card, CardHeader, LiveDot, Pill, ProgressBar, Textarea, useToast } from '../components/ui'
 
-type Filter = 'all' | 'synced' | 'unsynced' | 'failed'
+type Filter = 'all' | 'synced' | 'unsynced' | 'failed' | 'unbound'
 
 interface CpaStats {
   total: number
@@ -34,8 +34,9 @@ export function AccountsPage() {
     accountsApi.cpaStats().then(setStats).catch(() => {})
     accountsApi.list({
       page, page_size: pageSize,
-      // 后端只支持 cpa_synced bool 筛选;failed 客户端再过滤一道
-      cpa_synced: filter === 'all' ? undefined : filter === 'synced' ? true : false,
+      // 后端 cpa_synced / email_bound 都支持 bool 筛选;failed 客户端再过滤一道
+      cpa_synced: filter === 'synced' ? true : filter === 'unsynced' || filter === 'failed' ? false : undefined,
+      email_bound: filter === 'unbound' ? false : undefined,
     }).then((r) => { setItems(r.items); setTotal(r.total) })
   }
 
@@ -279,14 +280,19 @@ export function AccountsPage() {
                 />
               </div>
               <div className="seg">
-                {(['all', 'synced', 'unsynced', 'failed'] as Filter[]).map((v) => (
+                {(['all', 'synced', 'unsynced', 'failed', 'unbound'] as Filter[]).map((v) => (
                   <button
                     key={v}
                     type="button"
                     className={filter === v ? 'active' : ''}
                     onClick={() => { setFilter(v); setPage(1) }}
+                    title={v === 'unbound' ? '未绑邮箱号 — 下次 reauth 必须 SMS 花钱,需手动补绑' : undefined}
                   >
-                    {v === 'all' ? '全部' : v === 'synced' ? '已同步' : v === 'unsynced' ? '未同步' : '失败'}
+                    {v === 'all' ? '全部'
+                      : v === 'synced' ? '已同步'
+                      : v === 'unsynced' ? '未同步'
+                      : v === 'failed' ? '失败'
+                      : '未绑邮箱'}
                   </button>
                 ))}
               </div>
@@ -299,6 +305,7 @@ export function AccountsPage() {
               <tr>
                 <th>邮箱</th>
                 <th>密码</th>
+                <th>手机号</th>
                 <th>Plan</th>
                 <th>CPA</th>
                 <th>创建时间</th>
@@ -308,7 +315,7 @@ export function AccountsPage() {
             <tbody>
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan={6}>
+                  <td colSpan={7}>
                     <div className="empty-state">
                       <div className="empty-icon"><Search size={22} /></div>
                       暂无匹配的账号
@@ -351,6 +358,37 @@ export function AccountsPage() {
                         <Copy className="w-3.5 h-3.5" />
                       </button>
                     </div>
+                  </td>
+                  <td>
+                    {a.phone_e164 ? (
+                      <div className="flex items-center gap-2">
+                        <span className="mono text-[12.5px] text-ink-soft">{a.phone_e164}</span>
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-icon !w-6 !h-6"
+                          onClick={() => {
+                            navigator.clipboard?.writeText(a.phone_e164)
+                            push('已复制手机号', 'success')
+                          }}
+                          aria-label="复制手机号"
+                          title="复制手机号"
+                        >
+                          <Copy className="w-3 h-3" />
+                        </button>
+                        {!a.email_bound && (
+                          <span
+                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10.5px] font-semibold"
+                            style={{ background: 'rgba(245,158,11,0.15)', color: 'var(--warn)' }}
+                            title="此号未绑邮箱 — 下次 reauth 必须 SMS 花钱。补绑:用此手机号登录 chatgpt.com/account/settings 加邮箱"
+                          >
+                            <MailWarning className="w-3 h-3" />
+                            未绑邮箱
+                          </span>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="text-ink-faint">—</span>
+                    )}
                   </td>
                   <td>{planPill(a.plan_type)}</td>
                   <td>{cpaPill(a)}</td>

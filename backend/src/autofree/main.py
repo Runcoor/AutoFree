@@ -58,6 +58,9 @@ def _ensure_phone_verified_columns() -> None:
         ("account", "phone_verified_at", "DATETIME"),
         ("pending_account", "phone_verified", "BOOLEAN DEFAULT 0 NOT NULL"),
         ("pending_account", "phone_verified_at", "DATETIME"),
+        # phone-reg 注册号的手机号 + 是否已绑邮箱 — 用于后续手动补绑识别
+        ("account", "phone_e164", "VARCHAR(32) DEFAULT '' NOT NULL"),
+        ("account", "email_bound", "BOOLEAN DEFAULT 1 NOT NULL"),
     ]
     with SessionLocal() as db:
         for table, col, coldef in statements:

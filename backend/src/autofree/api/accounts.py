@@ -42,6 +42,8 @@ def _serialize_account(a: Account) -> dict:
         "cpa_error": a.cpa_error,
         "phone_verified": a.phone_verified,
         "phone_verified_at": a.phone_verified_at.isoformat() if a.phone_verified_at else None,
+        "phone_e164": getattr(a, "phone_e164", "") or "",
+        "email_bound": bool(getattr(a, "email_bound", True)),
         "created_at": a.created_at.isoformat() if a.created_at else None,
     }
 
@@ -68,6 +70,7 @@ def list_accounts(
     page_size: int = 50,
     batch_id: Optional[str] = None,
     cpa_synced: Optional[bool] = None,
+    email_bound: Optional[bool] = None,
     db: Session = Depends(get_db),
     _user=Depends(require_user),
 ) -> dict:
@@ -79,6 +82,8 @@ def list_accounts(
         stmt = stmt.where(Account.batch_id == batch_id)
     if cpa_synced is not None:
         stmt = stmt.where(Account.cpa_synced.is_(cpa_synced))
+    if email_bound is not None:
+        stmt = stmt.where(Account.email_bound.is_(email_bound))
 
     total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar() or 0
 

@@ -201,6 +201,8 @@ export interface Account {
   auth_json_path: string
   cpa_synced: boolean; cpa_synced_at: string | null; cpa_error: string | null
   phone_verified: boolean; phone_verified_at: string | null
+  phone_e164: string
+  email_bound: boolean
   created_at: string | null
 }
 export interface PendingAccount {
@@ -211,7 +213,7 @@ export interface PendingAccount {
 }
 
 export const accountsApi = {
-  list: (params: { page?: number; page_size?: number; batch_id?: string; cpa_synced?: boolean } = {}) =>
+  list: (params: { page?: number; page_size?: number; batch_id?: string; cpa_synced?: boolean; email_bound?: boolean } = {}) =>
     api.get<{ page: number; page_size: number; total: number; items: Account[] }>('/accounts', { params })
       .then(r => r.data),
   download: (email: string) => `/api/accounts/${encodeURIComponent(email)}/auth.json`,

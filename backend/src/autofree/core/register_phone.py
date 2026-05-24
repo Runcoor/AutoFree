@@ -1447,6 +1447,14 @@ def _phase1_signup(
             last_err = RegisterFailed("page 状态恢复失败")
             continue
 
+        # 每个 attempt 都强制重选国家 — Edit 回手机输入页时国家可能被前次提交重置回 US,
+        # 导致 +55 巴西号被填成 +1 美国格式触发「Phone number is not valid」死循环
+        try:
+            _select_country(page, country)
+            _sleep(0.6)
+        except Exception as exc:
+            logger.warning("[phone-reg] attempt=%d 重选国家异常(继续): %s", attempt, exc)
+
         try:
             _fill_phone_input(page, local_number, phone_e164, country)
         except Exception as exc:
@@ -1537,7 +1545,8 @@ def _phase1_signup(
 
         if not sms_visible:
             # SMS code 框 15s 未出现 — 检测页面是否已跳到「创建密码」/ about-you / 主页等
-            # 后续步骤(用户描述的真实流程:填手机号 → 提交 → 创建密码页 → ... → SMS 验证)
+            # 后续步骤(用户描述的真实流程:填手机号 → 提交 → 创建密码页 → 填密码
+            # → Continue → 这才触发 OpenAI 发 SMS → 验证页)
             try:
                 is_pw_page = page.locator(PASSWORD_INPUT_SELECTOR).first.is_visible(timeout=2000)
             except Exception:
@@ -1546,6 +1555,20 @@ def _phase1_signup(
                 cur_url = (page.url or "").lower()
             except Exception:
                 cur_url = ""
+            # body 文本兜底 — selector 被 React Aria overlay 拦截时仍能识别
+            try:
+                cur_body = (page.evaluate("() => (document.body && document.body.innerText || '').slice(0, 500)") or "")
+            except Exception:
+                cur_body = ""
+            cur_body_low = cur_body.lower()
+            if not is_pw_page and (
+                "create a password" in cur_body_low
+                or "set a password" in cur_body_low
+                or "创建密码" in cur_body
+                or "设置密码" in cur_body
+            ):
+                logger.info("[phone-reg] [DIAG] password selector 不可见但 body 含创建密码关键词 — 视为密码页")
+                is_pw_page = True
             # /log-in/password = 已存在账号登录页(不是 signup 创建密码)— 必须 ban 换号
             # 区分:/create-account/... 是 signup 创建密码;/log-in/password 是登录现有账号
             on_existing_login = "/log-in/password" in cur_url
@@ -1576,7 +1599,11 @@ def _phase1_signup(
                 safe_screenshot(page, SCREENSHOT_DIR / f"phone_05b_skipped_sms_a{attempt}.png")
                 break  # 跳出 SMS retry 循环,进 phase1 主循环
             else:
-                logger.warning("[phone-reg] 提交手机号后 15s 未见 code 框也未见后续页 — 号可能被拒")
+                logger.warning(
+                    "[phone-reg] 提交手机号后 15s 未见 code 框也未见后续页 — 号可能被拒 "
+                    "url=%s body[:160]=%r",
+                    cur_url[:120], cur_body[:160],
+                )
                 safe_screenshot(page, SCREENSHOT_DIR / f"phone_06_no_code_input_a{attempt}.png")
                 _safe_refund(sms_provider, order, "ban")
                 last_err = RegisterBlocked("phone_reg",
@@ -1886,7 +1913,9 @@ def _phase2_oauth(
 ) -> bool:
     """auth.openai.com OAuth 流程:用同一 phone 重新登录,自动 add-email,等 callback。
 
-    返回是否成功(callback 已捕获到 code 由调用方 capture_callback 检测)。
+    返回 email_bound:True = /add-email 已触发并绑了邮箱,False = 走 picker
+    shortcut 没绑(账号 phone-only,后续 reauth 必须 SMS)。
+    callback 是否捕获到 code 由调用方 capture_callback 检测,失败时本函数 raise OAuthFailed。
     """
     logger.info("[phone-reg] === Phase 2 OAuth 开始 ===")
     safe_screenshot(page, SCREENSHOT_DIR / "phone_20_phase2_start.png")
@@ -1920,11 +1949,11 @@ def _phase2_oauth(
             else:
                 logger.warning(
                     "[phone-reg] ⚠️ Phase 2 callback 已捕获,但 /add-email 未触发 — "
-                    "账号未绑定 email,以后 reauth 必须用 SMS(花钱)。"
-                    "如要补绑请手动登录 chatgpt.com/account/settings 加 email %s",
-                    email_for_bind,
+                    "账号 phone=%s 未绑定 email,以后 reauth 必须用 SMS(花钱)。"
+                    "如要补绑请手动登录 chatgpt.com/account/settings 用此手机号登录后加 email %s",
+                    phone_e164, email_for_bind,
                 )
-            return True
+            return email_bound
 
         try:
             url = (page.url or "")
@@ -2385,7 +2414,7 @@ def register_phone_and_fetch_bundle(
             )
 
             # Phase 2: auth.openai.com OAuth
-            _phase2_oauth(
+            email_bound = _phase2_oauth(
                 page, auth_url, sms_provider, order, country, phone_e164,
                 email_for_bind=email, mail_client=mail_client,
                 password=password,
@@ -2412,6 +2441,9 @@ def register_phone_and_fetch_bundle(
             bundle = _exchange_code(auth_code[0], code_verifier, fallback_email=email)
             bundle["phone_verified"] = True
             bundle["phone"] = phone_e164
+            # email_bound = False 说明 OAuth 走了 picker shortcut 没触发 /add-email,
+            # 后续 reauth 必须再花钱 SMS — UI 据此提示用户手动到 settings 补绑邮箱
+            bundle["email_bound"] = bool(email_bound)
 
             # 提交订单(确认扣费)
             try:

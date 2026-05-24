@@ -267,6 +267,11 @@ def run_batch(
                 "cpa_msg": cpa_msg,
                 # 是否本次走 5sim 完成手机验证 — DB 写 Account.phone_verified
                 "phone_verified": bool(bundle.get("phone_verified")),
+                # phone-reg 注册号的手机号(E.164);email-reg 走默认空串
+                "phone_e164": bundle.get("phone") or "",
+                # 是否已绑邮箱:email-reg 永远 True;phone-reg + /add-email 成功才 True
+                # bundle.get("email_bound") 缺省 None → email-reg 默认 True;phone-reg 显式赋值
+                "email_bound": True if bundle.get("email_bound") is None else bool(bundle.get("email_bound")),
             })
 
             # 4) accounts.txt 追加 — 失败也不丢号(token 已落 auth.json + DB + CPA)

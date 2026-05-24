@@ -99,6 +99,14 @@ class Account(Base):
     # 用途:pending 列表里突显已付费号,告诉用户「这号花过钱,优先 resume,别浪费」
     phone_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     phone_verified_at: Mapped[Optional[_dt.datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # phone-reg 注册的号的手机号(E.164,例 +5585999700974);email-reg 走默认空串
+    phone_e164: Mapped[str] = mapped_column(String(32), default="", nullable=False, index=True)
+    # 此号是否绑了 email(可走邮件 reauth)。
+    # - email-reg → True(默认)
+    # - phone-reg + /add-email 成功 → True
+    # - phone-reg 但 OAuth 走 picker shortcut 没触发 /add-email → False
+    #   未绑号下次 reauth 必须再花钱跑 SMS,需要用户手动到 settings 补绑
+    email_bound: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
 
     batch: Mapped[Batch] = relationship(back_populates="accounts")

@@ -144,6 +144,8 @@ def _persist_account(info: dict, *, domain: str | None = None) -> None:
                     except Exception:
                         rel = info.get("auth_file", "")
                 phone_verified = bool(info.get("phone_verified"))
+                # email_bound:email-reg 默认 True;phone-reg 显式由 register_phone 设
+                email_bound = True if info.get("email_bound") is None else bool(info.get("email_bound"))
                 a = Account(
                     batch_id=info.get("batch_id", ""),
                     email=email,
@@ -161,8 +163,15 @@ def _persist_account(info: dict, *, domain: str | None = None) -> None:
                     cpa_error=None if info.get("cpa_pushed") else (info.get("cpa_msg") or None),
                     phone_verified=phone_verified,
                     phone_verified_at=_utcnow() if phone_verified else None,
+                    phone_e164=info.get("phone_e164") or "",
+                    email_bound=email_bound,
                 )
                 db.add(a)
+                if not email_bound:
+                    logger.warning(
+                        "[persist] ⚠️ Account %s 创建时未绑邮箱 (phone=%s) — 需手动补绑",
+                        email, info.get("phone_e164") or "?",
+                    )
         else:
             if is_resume:
                 # 失败 → 更新现有 pending,而非新增重复行
