@@ -297,6 +297,36 @@ def _detect_phone_invalid(page: Page) -> str | None:
     return None
 
 
+def _classify_password_page(page: Page) -> str:
+    """密码页文本分类:'create' / 'existing' / 'unknown'。
+
+    同一个 URL(例如 /create-account/password 或 /create-account/x)下页面
+    可能是两种状态:
+      - "Create your password" / "Create a password" / "Set a password" / 中文 — 新号
+        创建密码,需要填 password 继续
+      - "Enter your password" / "Forgot password?" / 中文 — 已注册号登录页,必须
+        ban 该号换新号(因为我们注册新号时不该撞到此页)
+
+    返回 'unknown' 表示不是密码相关页(让上层走原本的分支)。"""
+    try:
+        body = page.locator("body").inner_text(timeout=1500) or ""
+    except Exception:
+        return "unknown"
+    body_low = body.lower()
+    # 已存在账号特征(最强信号 = Forgot password 链接)
+    if "forgot password" in body_low or "忘记密码" in body or "找回密码" in body:
+        return "existing"
+    if "enter your password" in body_low or "输入你的密码" in body or "输入密码" in body:
+        return "existing"
+    # 新号创建密码特征
+    if ("create your password" in body_low or "create a password" in body_low
+            or "set a password" in body_low or "set your password" in body_low):
+        return "create"
+    if "创建密码" in body or "设置密码" in body or "请创建密码" in body:
+        return "create"
+    return "unknown"
+
+
 def _detect_oauth_error(page: Page) -> str | None:
     """auth.openai.com 出错页(no_valid_organizations / something went wrong)。"""
     try:
@@ -1560,32 +1590,28 @@ def _phase1_signup(
                 cur_body = (page.evaluate("() => (document.body && document.body.innerText || '').slice(0, 500)") or "")
             except Exception:
                 cur_body = ""
-            cur_body_low = cur_body.lower()
-            if not is_pw_page and (
-                "create a password" in cur_body_low
-                or "set a password" in cur_body_low
-                or "创建密码" in cur_body
-                or "设置密码" in cur_body
-            ):
-                logger.info("[phone-reg] [DIAG] password selector 不可见但 body 含创建密码关键词 — 视为密码页")
-                is_pw_page = True
-            # /log-in/password = 已存在账号登录页(不是 signup 创建密码)— 必须 ban 换号
-            # 区分:/create-account/... 是 signup 创建密码;/log-in/password 是登录现有账号
-            on_existing_login = "/log-in/password" in cur_url
+            # 密码页变体:"Create your password" = 新号,"Enter your password" + "Forgot password?" = 已注册
+            pw_kind = _classify_password_page(page) if is_pw_page else "unknown"
+            # /log-in/password URL OR body 文本是「Enter your password」/「Forgot password?」 → 已存在号
+            on_existing_login = ("/log-in/password" in cur_url) or (pw_kind == "existing")
             on_about_you = ("about-you" in cur_url) or ("about_you" in cur_url)
             on_main = ("chatgpt.com" in cur_url and "auth.openai.com" not in cur_url
                        and "/auth/" not in cur_url)
+            # 「Create your password」体也算密码页(即使 input selector 被 overlay 拦截)
+            if not is_pw_page and pw_kind == "create":
+                logger.info("[phone-reg] [DIAG] password selector 不可见但 body 含「Create your password」 — 视为新号密码页")
+                is_pw_page = True
 
             if on_existing_login:
                 logger.warning(
-                    "[phone-reg] 号 %s 被识别为已存在账号(URL=/log-in/password)— ban 换号 attempt=%d",
-                    phone_e164, attempt,
+                    "[phone-reg] 号 %s 被识别为已存在账号(url=%s pw_kind=%s)— ban 换号 attempt=%d",
+                    phone_e164, cur_url[:80], pw_kind, attempt,
                 )
                 safe_screenshot(page, SCREENSHOT_DIR / f"phone_05c_existing_account_a{attempt}.png")
                 _safe_refund(sms_provider, order, "ban")
                 last_err = RegisterBlocked(
                     "phone_reg",
-                    f"号 {phone_e164} 已被注册过 (/log-in/password)",
+                    f"号 {phone_e164} 已被注册过(Enter your password / Forgot password 链接出现)",
                     is_phone=True,
                 )
                 continue
@@ -1741,25 +1767,27 @@ def _phase1_signup(
         if last_url == url and not is_pw_page:
             continue
 
-        # 密码页 — 但 /log-in/password 是已存在账号登录页,要 ban 换号(不是 signup 创建密码)
-        if "/log-in/password" in url.lower():
+        # 密码页分类(主循环必走) — URL /log-in/password OR body 含「Enter your password」/
+        # 「Forgot password?」 → 已注册号,必须 ban 换号;否则视为 Create your password(新号)
+        pw_kind = _classify_password_page(page) if is_pw_page else "unknown"
+        if "/log-in/password" in url.lower() or pw_kind == "existing":
             logger.warning(
-                "[phone-reg] phase1 r%d 主循环命中 /log-in/password — 号 %s 已存在账号,ban 换号",
-                round_idx, phone_e164,
+                "[phone-reg] phase1 r%d 主循环命中已注册号密码页(url=%s pw_kind=%s)— 号 %s,ban 换号",
+                round_idx, url[:80], pw_kind, phone_e164,
             )
             safe_screenshot(page, SCREENSHOT_DIR / f"phone_main_existing_account_r{round_idx}.png")
             _safe_refund(sms_provider, order, "ban")
             raise RegisterBlocked(
                 "phone_reg",
-                f"主循环检测到 /log-in/password — 号 {phone_e164} 已被注册过",
+                f"主循环检测到已注册号密码页(Enter your password / Forgot password)— 号 {phone_e164} 已被注册过",
                 is_phone=True,
             )
 
         if is_pw_page:
             diag_counts["pw_hit"] += 1
             logger.info(
-                "[phone-reg] [DIAG] phase1 r%d 命中密码页(#%d) url=%s",
-                round_idx, diag_counts["pw_hit"], url[:80],
+                "[phone-reg] [DIAG] phase1 r%d 命中创建密码页(#%d) url=%s pw_kind=%s",
+                round_idx, diag_counts["pw_hit"], url[:80], pw_kind,
             )
             _fill_password_input(page, password)
             _click_submit_button(page)
