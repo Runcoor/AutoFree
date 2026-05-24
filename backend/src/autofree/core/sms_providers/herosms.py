@@ -270,16 +270,89 @@ class HeroSmsProvider(SmsProvider):
         from autofree.core.sms import SmsError
         raise SmsError(f"[hero-sms] getBalance 异常返回: {text}")
 
+    def _query_market(self, svc: str, cid: int) -> dict | None:
+        """查询 Free Price 池实时市场数据(hero-sms 前端用的公开 endpoint,无需 api_key)。
+
+        返回示例:
+          {"min": 0.025, "default": 0.025, "avg": 0.0246, "maxAvailable": 0.2942,
+           "totalCount": 38842, "operators": [{"name": "tim", "min": 0.0185, "count": 5977}, ...]}
+        失败/不可用返回 None — 调用方继续走原 buy 流程,不阻塞。
+        """
+        try:
+            url = f"https://hero-sms.com/api/v1/left-menu/service/{svc}/country/{cid}/offers"
+            resp = requests.get(url, timeout=10)
+            if resp.status_code != 200:
+                return None
+            body = resp.json()
+            svc_block = (body.get("data") or {}).get(svc) or {}
+            fp = svc_block.get("freePrice") or {}
+            ops = []
+            for op in svc_block.get("operators") or []:
+                offers = op.get("freePriceOffers") or {}
+                if not offers:
+                    continue
+                try:
+                    prices = sorted(float(k) for k in offers.keys())
+                except Exception:
+                    continue
+                ops.append({
+                    "name": op.get("name"),
+                    "min": prices[0] if prices else None,
+                    "count": op.get("activationsCount") or 0,
+                })
+            # freePrice.min 是平台「建议起步价」(常常等于标准价池底价,如
+            # Brazil+OpenAI 报 $0.075),但 operators[].freePriceOffers 里有更便宜
+            # 的真实库存(any/tim 池可能 $0.03 起 7 万+ 号)。用实际 operator min
+            # 作为「真实市场最低」用于预检。
+            real_min = min((o["min"] for o in ops if o.get("min") is not None), default=None)
+            return {
+                "min": float(fp.get("min")) if fp.get("min") is not None else None,
+                "default": float(fp.get("default")) if fp.get("default") is not None else None,
+                "avg": float(fp.get("avg")) if fp.get("avg") is not None else None,
+                "maxAvailable": float(fp.get("maxAvailable")) if fp.get("maxAvailable") is not None else None,
+                "totalCount": sum(o.get("count", 0) for o in ops),
+                "operators": ops,
+                "real_min": real_min,
+            }
+        except Exception as exc:
+            logger.debug("[hero-sms] 市场预检失败 svc=%s cid=%s: %s", svc, cid, exc)
+            return None
+
     def buy_activation(
         self, *, country: str, operator: str, product: str,
         max_price: float | None = None,
     ) -> SmsOrder:
-        from autofree.core.sms import SmsBuyFailed
+        from autofree.core.sms import SmsBuyFailed, SmsConfigMissing
         cid = _country_to_id(country)
         svc = _service_to_code(product)
         params: dict = {"service": svc, "country": cid}
         if operator and operator.strip().lower() not in ("", "any"):
             params["operator"] = operator.strip().lower()
+
+        # 设了 max_price 时,先用公开 marketplace endpoint 预检 — 避免被 hero-sms
+        # 的 buy API 用 HTTP 400 拒绝,且能给用户清晰的市场价反馈。
+        if max_price is not None and max_price > 0:
+            market = self._query_market(svc, cid)
+            if market:
+                real_min = market.get("real_min")
+                # 输出可买到的运营商池(min ≤ max_price)— 给用户清晰反馈
+                eligible = [o for o in market["operators"]
+                            if o.get("min") is not None and o["min"] <= max_price]
+                eligible_summary = ", ".join(
+                    f"{o['name']} ${o['min']}/{o['count']}号" for o in eligible[:5]
+                ) or "(无)"
+                logger.info(
+                    "[hero-sms] 市场预检 svc=%s country=%s real_min=$%s 平台建议=$%s "
+                    "总库存=%d 你限价≤$%s 可买池=%s",
+                    svc, cid, real_min, market.get("min"),
+                    market["totalCount"], max_price, eligible_summary,
+                )
+                if real_min is not None and max_price < real_min:
+                    raise SmsConfigMissing(
+                        f"[hero-sms] max_price=${max_price} 低于真实市场最低价 "
+                        f"${real_min}(平台建议 ${market.get('min')},avg ${market.get('avg')})— "
+                        f"请调高 max_price 或换国家/服务"
+                    )
         # max_price=0.028 → 只接 ≤$0.028 的号,贵的拒收(sms-activate 协议 maxPrice)。
         # 关键:必须同时带 freePrice=true,否则只查「标准价池」(国家+服务的官方底价
         # 通常很贵,如 Brazil+OpenAI 最低 $0.075),拒收 < $0.075 的请求。
