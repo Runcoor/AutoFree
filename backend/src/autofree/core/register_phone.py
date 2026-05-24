@@ -2174,6 +2174,50 @@ def _phase2_oauth(
             last_url = url
             continue
 
+        # 7.5) 「Welcome back / Choose an account」picker — OAuth 流程里 OpenAI
+        # 偶尔插入一步要求选账号(此刻已登录的账号会列出来,点它继续 OAuth)
+        try:
+            body_text = page.inner_text("body", timeout=1500)[:2000]
+        except Exception:
+            body_text = ""
+        if ("Welcome back" in body_text or "选择账号" in body_text
+                or "Choose an account" in body_text):
+            logger.info("[phone-reg] phase2 r%d Account picker (Welcome back) — 点首个账号",
+                        round_idx)
+            try:
+                # 点除「Log in to another account / Create account」之外的任意账号项
+                clicked = page.evaluate(
+                    """() => {
+                        const skip = ['log in to another', '另一个账号', 'create account', '创建账号',
+                                      'log out', '登出'];
+                        // 通常账号项是 li/button/a,带 email 或 +country dial
+                        const cands = document.querySelectorAll(
+                            'button, a, li, [role="button"]'
+                        );
+                        for (const el of cands) {
+                            const r = el.getBoundingClientRect();
+                            if (r.width <= 0 || r.height <= 0) continue;
+                            const t = (el.innerText || '').trim().toLowerCase();
+                            if (!t || t.length > 200) continue;
+                            if (skip.some(s => t.includes(s))) continue;
+                            // 含 @ 或 +数字 是账号标识
+                            if (t.includes('@') || /\\+\\d{1,4}/.test(t)) {
+                                el.scrollIntoView({ block: 'center' });
+                                el.click();
+                                return t.slice(0, 80);
+                            }
+                        }
+                        return null;
+                    }"""
+                )
+                if clicked:
+                    logger.info("[phone-reg] account picker 点中: %r", clicked)
+                    _sleep(3)
+                    last_url = url
+                    continue
+            except Exception as exc:
+                logger.warning("[phone-reg] account picker 点击异常: %s", exc)
+
         # 8) consent 页面:点 Allow/Continue
         if "/consent" in url_low or "/authorize" in url_low:
             logger.info("[phone-reg] phase2 r%d consent 页", round_idx)
@@ -2308,7 +2352,11 @@ def register_phone_and_fetch_bundle(
                 safe_screenshot(page, SCREENSHOT_DIR / "phone_31_no_auth_code.png")
                 raise OAuthFailed("Phase 2 完成但未捕获到 auth_code")
 
-            # 交换 token
+            # 给 OpenAI 后端时间 finalize auth_code,避免太快 exchange 撞
+            # token_exchange_user_error("try again later")
+            time.sleep(1.5)
+
+            # 交换 token(内部有 3 次重试,处理临时性 try-again 错误)
             bundle = _exchange_code(auth_code[0], code_verifier, fallback_email=email)
             bundle["phone_verified"] = True
             bundle["phone"] = phone_e164

@@ -89,21 +89,52 @@ def _decode_jwt_payload(token: str) -> dict:
 
 
 def _exchange_code(auth_code: str, code_verifier: str, fallback_email: str) -> dict:
-    """code → bundle dict。"""
-    resp = requests.post(
-        CODEX_TOKEN_URL,
-        data={
-            "grant_type": "authorization_code",
-            "client_id": CODEX_CLIENT_ID,
-            "code": auth_code,
-            "redirect_uri": CODEX_REDIRECT_URI,
-            "code_verifier": code_verifier,
-        },
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=30,
-    )
+    """code → bundle dict。
+
+    OpenAI 偶尔在 auth_code 刚生成、还没在 OAuth 后端完全 finalize 时收到 exchange
+    请求,会返 HTTP 400 invalid_request_error + token_exchange_user_error +
+    "try again later"。所以这里加重试:最多 3 次,失败间隔 3s/6s。
+    """
+    last_err = ""
+    for attempt in range(3):
+        if attempt > 0:
+            # 第 2/3 次重试前等待,给 OpenAI 后端 finalize 时间
+            wait_s = 3 * attempt  # 3s, 6s
+            logger.info("[oauth] token 交换第 %d 次重试(等 %ds)— 上次错误:%s",
+                        attempt + 1, wait_s, last_err[:200])
+            time.sleep(wait_s)
+        try:
+            resp = requests.post(
+                CODEX_TOKEN_URL,
+                data={
+                    "grant_type": "authorization_code",
+                    "client_id": CODEX_CLIENT_ID,
+                    "code": auth_code,
+                    "redirect_uri": CODEX_REDIRECT_URI,
+                    "code_verifier": code_verifier,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=30,
+            )
+        except Exception as exc:
+            last_err = f"网络异常: {exc}"
+            continue
+        if resp.status_code == 200:
+            break
+        last_err = f"HTTP {resp.status_code}: {resp.text[:300]}"
+        # 401/403:授权层面错误,重试也是同样错(invalid_grant / code 过期)→ 直接抛
+        # 400 + token_exchange_user_error / try again later:临时错误 → 继续重试
+        if resp.status_code in (401, 403):
+            break
+        if resp.status_code == 400 and "try again later" not in resp.text.lower() \
+                and "token_exchange_user_error" not in resp.text:
+            # 不是 try-again 类的 400(如 invalid_grant)→ 也别重试
+            break
+    else:
+        raise OAuthFailed(f"token 交换 3 次都失败: {last_err}")
+
     if resp.status_code != 200:
-        raise OAuthFailed(f"token 交换失败 HTTP {resp.status_code}: {resp.text[:300]}")
+        raise OAuthFailed(f"token 交换失败 {last_err}")
     data = resp.json()
     id_token = data.get("id_token", "")
     claims = _decode_jwt_payload(id_token)
