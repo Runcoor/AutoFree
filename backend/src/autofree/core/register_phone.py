@@ -2059,12 +2059,12 @@ def _phase2_oauth(
         logger.info("[phone-reg] 已清 OpenAI/ChatGPT 域 cookies(共 %d 条)— 强制 phase2 走完整登录触发 /add-email", cleared)
     except Exception as exc:
         logger.warning("[phone-reg] 清 cookies 失败(继续,但 picker 可能出现): %s", exc)
-    # 顺手清掉 localStorage / sessionStorage / IndexedDB / Cache Storage —
+    # 顺手清掉 localStorage / sessionStorage / IndexedDB / Cache Storage / Service Worker —
     # OpenAI 把 OAuth session 散放在这些地方,只清 cookie 不够。必须在 *.openai.com /
     # chatgpt.com 域上下文里清才有效 — 现在 page 还在 chatgpt.com,先 goto 各 OpenAI 域
     _CLEAR_STORAGE_JS = """
         () => {
-            const r = { ls: 0, ss: 0, idb: [], cache: 0 };
+            const r = { ls: 0, ss: 0, idb: [], cache: 0, sw: 0 };
             try {
                 r.ls = localStorage.length;
                 localStorage.clear();
@@ -2073,29 +2073,39 @@ def _phase2_oauth(
                 r.ss = sessionStorage.length;
                 sessionStorage.clear();
             } catch(e) {}
+            const tasks = [];
             // IndexedDB:列出所有 db 并 delete
             try {
                 if (indexedDB.databases) {
-                    return indexedDB.databases().then(dbs => {
-                        const promises = dbs.map(db => new Promise(res => {
+                    tasks.push(indexedDB.databases().then(dbs => {
+                        return Promise.all(dbs.map(db => new Promise(res => {
                             try {
                                 const req = indexedDB.deleteDatabase(db.name);
                                 req.onsuccess = req.onerror = req.onblocked = () => res(db.name);
                             } catch(e) { res(null); }
-                        }));
-                        return Promise.all(promises).then(names => {
-                            r.idb = names.filter(Boolean);
-                            // Cache Storage(Service Worker 缓存)
-                            return (typeof caches !== 'undefined' && caches.keys ? caches.keys() : Promise.resolve([]))
-                                .then(keys => Promise.all(keys.map(k => caches.delete(k))).then(() => {
-                                    r.cache = keys.length;
-                                    return r;
-                                }));
-                        });
-                    });
+                        }))).then(names => { r.idb = names.filter(Boolean); });
+                    }));
                 }
             } catch(e) {}
-            return r;
+            // Cache Storage(Service Worker 缓存)
+            try {
+                if (typeof caches !== 'undefined' && caches.keys) {
+                    tasks.push(caches.keys().then(keys => {
+                        r.cache = keys.length;
+                        return Promise.all(keys.map(k => caches.delete(k)));
+                    }));
+                }
+            } catch(e) {}
+            // Service Worker — 注销所有 reg,避免他们拦截后续请求重新挂回 session
+            try {
+                if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+                    tasks.push(navigator.serviceWorker.getRegistrations().then(regs => {
+                        r.sw = regs.length;
+                        return Promise.all(regs.map(reg => reg.unregister()));
+                    }));
+                }
+            } catch(e) {}
+            return Promise.all(tasks).then(() => r);
         }
     """
     for origin in ("https://chatgpt.com/", "https://auth.openai.com/"):
@@ -2105,6 +2115,20 @@ def _phase2_oauth(
             logger.info("[phone-reg] 已清 %s 上的存储: %s", origin, cleared_info)
         except Exception as exc:
             logger.warning("[phone-reg] 清 %s 存储失败: %s", origin, exc)
+
+    # 主动访问 /logout — 让 OpenAI 后端 invalidate session,防止 picker
+    try:
+        page.goto("https://auth.openai.com/logout", wait_until="domcontentloaded", timeout=15000)
+        _sleep(2)
+        logger.info("[phone-reg] 已主动访问 auth.openai.com/logout")
+    except Exception as exc:
+        logger.warning("[phone-reg] /logout 访问失败(继续): %s", exc)
+    # 再清一次 cookies — /logout 可能写新 cookie
+    try:
+        page.context.clear_cookies()
+        logger.info("[phone-reg] /logout 后再清一次 cookies")
+    except Exception:
+        pass
 
     page.goto(auth_url, wait_until="domcontentloaded", timeout=60000)
     _sleep(3)
@@ -2670,16 +2694,38 @@ def register_phone_and_fetch_bundle(
                 callback_url = full_callback_url[0] or ""
                 if not callback_url:
                     raise OAuthFailed("CPA 模式但 full_callback_url 为空")
-                logger.info("[phone-reg] 回填 callback URL 给 CPA state=%s url=%s",
-                            cpa_state[:8], callback_url[:120])
+
+                # 校验 state 是否匹配 — picker shortcut 可能让 OpenAI 内部重启 OAuth
+                # 生成新 state,跟我们从 CPA 拿的 state 不一致 → CPA 报 "unknown state"
+                cb_qs = urllib.parse.parse_qs(urllib.parse.urlparse(callback_url).query)
+                cb_state = cb_qs.get("state", [""])[0]
+                cb_code = cb_qs.get("code", [""])[0]
+                state_match = (cb_state == cpa_state)
+                logger.info(
+                    "[phone-reg] CPA callback 诊断:期望 state=%s | 实际 state=%s | match=%s | code=%s",
+                    cpa_state[:12], cb_state[:12], state_match, cb_code[:12] + "...",
+                )
+                if not state_match:
+                    logger.error(
+                        "[phone-reg] ❌ state 不匹配!OpenAI 走了 picker shortcut 重启 OAuth,"
+                        "用了新 state %s 不是 CPA 的 %s。说明 cookies/storage 清理不彻底,"
+                        "picker 仍然出现并被点击。",
+                        cb_state[:12], cpa_state[:12],
+                    )
+
+                logger.info("[phone-reg] 回填 callback URL 给 CPA url=%s",
+                            callback_url[:150])
                 ok_post, msg_post = submit_oauth_callback(callback_url)
                 if not ok_post:
-                    # CPA state 过期是已知失败:phase1+phase2 太慢,CPA 已忘了这个 state
+                    if not state_match:
+                        raise OAuthFailed(
+                            f"回填 CPA 失败:state 不匹配(OAuth 被 picker shortcut 重启)— "
+                            f"CPA: {msg_post}"
+                        )
                     if "expired" in msg_post.lower() or "404" in msg_post:
                         logger.error(
-                            "[phone-reg] CPA state 过期(%s)— 整个流程花了 >CPA 的 state TTL。"
-                            "考虑加快 phase1 或要求 CPA 延长 TTL",
-                            msg_post,
+                            "[phone-reg] CPA state 真的过期(state 匹配但 CPA 说 expired)— "
+                            "整个 phase2 花了 >CPA 的 state TTL。让 CPA 延长 TTL 或让 phase2 更快。"
                         )
                     raise OAuthFailed(f"回填 CPA /oauth-callback 失败: {msg_post}")
                 logger.info("[phone-reg] ✅ CPA 已收 callback: %s", msg_post)
