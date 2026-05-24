@@ -290,6 +290,7 @@ class HeroSmsProvider(SmsProvider):
             svc_block = (body.get("data") or {}).get(svc) or {}
             fp = svc_block.get("freePrice") or {}
             ops = []
+            all_tiers: set[float] = set()  # 跨 operator 的所有价格档去重并集
             for op in svc_block.get("operators") or []:
                 offers = op.get("freePriceOffers") or {}
                 if not offers:
@@ -298,6 +299,7 @@ class HeroSmsProvider(SmsProvider):
                     prices = sorted(float(k) for k in offers.keys())
                 except Exception:
                     continue
+                all_tiers.update(prices)
                 ops.append({
                     "name": op.get("name"),
                     "min": prices[0] if prices else None,
@@ -319,6 +321,7 @@ class HeroSmsProvider(SmsProvider):
                 "maxRank": float(fp.get("maxRank")) if fp.get("maxRank") is not None else None,
                 "totalCount": sum(o.get("count", 0) for o in ops),
                 "operators": ops,
+                "price_tiers": sorted(all_tiers),  # 跨 op 全部价格档 — 用于随机选档
                 "marketplace_min": marketplace_min,
             }
         except Exception as exc:
@@ -336,11 +339,16 @@ class HeroSmsProvider(SmsProvider):
         if operator and operator.strip().lower() not in ("", "any"):
             params["operator"] = operator.strip().lower()
 
-        # 设了 max_price 时,用公开 endpoint 预检 — 避免被 hero-sms HTTP 400 拒绝。
-        # 真实 API 下限是 freePrice.min(不是 operators[].min)— marketplace 那些 $0.03
-        # 的便宜号只能网页登录买,API 拿不到。
+        # max_price 处理:
+        # 1) 预检 — 避免被 hero-sms HTTP 400 拒绝,真实 API 下限 = freePrice.min
+        # 2) 随机选档 — 在 [api_min, max_price] 范围的全部价格档里随机挑一个作本次
+        #    maxPrice,既不超上限又分散价位,降低服务端追踪「同一客户固定 $0.025」
+        #    的模式风险
+        # 注意:hero-sms 不开放 marketplace(\$0.025 以下池)给 handler_api,
+        # 网页上看到的更便宜的号 API 拿不到。
         if max_price is not None and max_price > 0:
             market = self._query_market(svc, cid)
+            chosen_max = max_price
             if market:
                 api_min = market.get("min")  # freePrice.min,API 真实下限
                 mp_min = market.get("marketplace_min")  # operators 最低,仅网页可买
@@ -357,13 +365,22 @@ class HeroSmsProvider(SmsProvider):
                         f"[hero-sms] max_price=${max_price} 低于 API 最低价 "
                         f"${api_min}{mp_hint} — 请调高 max_price 到 ≥${api_min} 或换国家/服务"
                     )
-        # max_price=0.080 → 只接 ≤$0.080 的号,贵的拒收(sms-activate 协议 maxPrice)。
-        # 注意:hero-sms 不开放 marketplace 给 handler_api,API 真实下限 = freePrice.min
-        # (实测带 freePrice=true 没用)。网页上 $0.025 的便宜号 API 拿不到。
-        if max_price is not None and max_price > 0:
-            params["maxPrice"] = f"{max_price:.4f}".rstrip("0").rstrip(".")
-            logger.info("[hero-sms] 限价 maxPrice=$%s (注:marketplace 价不在 API 范围)",
-                        params["maxPrice"])
+                # 随机选档(优先选 ≥ api_min 的档,因为 < api_min 的服务端会拒)
+                tiers = market.get("price_tiers") or []
+                eligible = [
+                    t for t in tiers
+                    if t <= max_price + 1e-9 and (api_min is None or t >= api_min - 1e-9)
+                ]
+                if eligible:
+                    import random as _random
+                    chosen_max = _random.choice(eligible)
+                    logger.info(
+                        "[hero-sms] 价格档随机:从 %d 档 [≥$%s ≤$%s] 中选 $%s (候选: %s)",
+                        len(eligible), api_min, max_price, chosen_max,
+                        ", ".join(f"${t}" for t in eligible),
+                    )
+            params["maxPrice"] = f"{chosen_max:.4f}".rstrip("0").rstrip(".")
+            logger.info("[hero-sms] 限价 maxPrice=$%s", params["maxPrice"])
 
         text = self._api("getNumberV2", params)
 
