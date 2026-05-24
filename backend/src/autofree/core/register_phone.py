@@ -2107,6 +2107,247 @@ def _phase1_signup(
     raise RegisterFailed(f"Phase 1 完成资料阶段超时 (20 轮),最后 url={page.url}")
 
 
+def _fill_add_email(page: Page, email: str) -> None:
+    """填 /add-email 的 email 输入框 — JS focus + keyboard.type 避开 React Aria 拦截。
+
+    抛 OAuthFailed 如果找不到 input 或填写失败。"""
+    deadline = time.monotonic() + 5
+    ei_sel = ('input[type="email"], input[name="email"], '
+              'input[name="username"], input[name="identifier"]')
+    ready = False
+    while time.monotonic() < deadline:
+        if page.evaluate(f"() => !!document.querySelector('{ei_sel}')"):
+            ready = True
+            break
+        _sleep(0.3)
+    if not ready:
+        raise OAuthFailed("/add-email 找不到 email 输入框")
+    focused = page.evaluate(
+        """(s) => {
+            const el = document.querySelector(s);
+            if (!el) return false;
+            el.focus();
+            return document.activeElement === el;
+        }""",
+        ei_sel,
+    )
+    if not focused:
+        page.locator(ei_sel).first.click(force=True, timeout=3000)
+    _sleep(0.2)
+    try:
+        page.keyboard.press("Control+A")
+        page.keyboard.press("Delete")
+    except Exception:
+        pass
+    page.keyboard.type(email, delay=30)
+    _sleep(0.3)
+
+
+# ─── Phase 1.5: 注册后立即绑邮箱(auth.openai.com/add-email) ──────────────────
+#
+# 为什么需要这步:phase 1 注册完只有 phone+password,账号未绑邮箱。phase 2 OAuth
+# 时,OpenAI 会发个 callback code,但因为账号不完整(没邮箱),token 交换返
+# token_exchange_user_error。所以 phase 1 完成、phase 2 之前,必须先把邮箱绑上。
+#
+# 用 phase 1 同一个 context(带 cookies),直接 navigate 到
+# https://auth.openai.com/add-email。OpenAI 看 session 是登录态,直接进绑邮箱页;
+# 若被重定向到 /log-in,补一次密码登录(phone+password 都有)即可。
+
+def _phase15_bind_email(
+    page: Page,
+    *,
+    email_for_bind: str,
+    mail_client,
+    password: str,
+    phone_e164: str,
+    country: PhoneCountry,
+) -> bool:
+    """phase 1 完成后立即绑邮箱。返回 True 表示已绑成功,False 表示放弃(不抛)。
+
+    设计:不抛 OAuthFailed — 即便绑邮箱失败,phase 2 也可以尝试(顶多再失败一次,
+    号当 phone-only pending 入库,用户可以走「补绑邮箱」按钮重试)。这步是
+    best-effort,不阻塞主流程。
+    """
+    logger.info("[phone-reg] === Phase 1.5 绑邮箱 === email=%s", email_for_bind)
+    safe_screenshot(page, SCREENSHOT_DIR / "phone_15_pre_bind_email.png")
+
+    # cloud-mail baseline:绑后 OTP 不抓老邮件
+    try:
+        mail_baseline_id = mail_client.latest_mail_id(email_for_bind)
+    except Exception as exc:
+        logger.warning("[phone-reg] phase1.5 取 cloud-mail baseline 失败(继续): %s", exc)
+        mail_baseline_id = None
+
+    try:
+        page.goto("https://auth.openai.com/add-email", wait_until="load", timeout=30000)
+        _sleep(2)
+        wait_cloudflare(page, max_wait_seconds=30)
+    except Exception as exc:
+        logger.warning("[phone-reg] phase1.5 goto /add-email 失败(放弃): %s", exc)
+        return False
+
+    safe_screenshot(page, SCREENSHOT_DIR / "phone_15a_add_email_landing.png")
+
+    email_submitted = False
+    otp_submitted = False
+    last_url = ""
+    for round_idx in range(15):
+        if is_stop_requested():
+            logger.info("[phone-reg] phase1.5 收到 stop,放弃绑邮箱")
+            return False
+
+        _sleep(2)
+        try:
+            url = (page.url or "")
+            url_low = url.lower()
+            inputs_info = page.evaluate(
+                """() => Array.from(document.querySelectorAll('input:not([type=hidden])')).map(i => ({
+                    type: i.type, name: i.name, placeholder: i.placeholder || '',
+                }))"""
+            )
+            body_text = page.evaluate("() => (document.body && document.body.innerText || '').slice(0, 500)")
+        except Exception:
+            logger.debug("[phone-reg] phase1.5 r%d eval 失败", round_idx)
+            last_url = ""
+            continue
+
+        if url != last_url:
+            input_types = [i.get("type") for i in inputs_info if i.get("type")]
+            logger.info(
+                "[phone-reg] [DIAG] phase1.5 r%d url=%s inputs=%s body[:160]=%r",
+                round_idx, url[:120], input_types[:8], (body_text or "")[:160],
+            )
+            safe_screenshot(page, SCREENSHOT_DIR / f"phone_15_bind_r{round_idx:02d}.png")
+
+        # 成功:落回 chatgpt.com 主页 或 settings 页 — 绑邮箱完成
+        if (("chatgpt.com" in url_low and "auth.openai.com" not in url_low
+                and "/auth/" not in url_low)
+                or "success" in url_low
+                or (otp_submitted and "add-email" not in url_low and "email-verification" not in url_low)):
+            logger.info("[phone-reg] ✅ phase1.5 绑邮箱完成 url=%s", url[:100])
+            safe_screenshot(page, SCREENSHOT_DIR / "phone_15z_bind_done.png")
+            return True
+
+        # 被重定向到 /log-in — 补一次手机登录(同 phase 2 流程,但不涉及 OAuth)
+        has_phone_login_btn = False
+        try:
+            btns_info = page.evaluate(
+                """() => Array.from(document.querySelectorAll('button')).map(b => (b.innerText || '').trim()).filter(t => t)"""
+            )
+            has_phone_login_btn = any(any(t in b for t in PHONE_LOGIN_TEXTS) for b in btns_info)
+        except Exception:
+            btns_info = []
+        has_phone_input = any(
+            i.get("name") == "phoneNumberInput" or i.get("type") == "tel" for i in inputs_info
+        )
+
+        # 1) Welcome back / 登录方式选择页 → 点「Continue with phone」
+        if has_phone_login_btn and not has_phone_input:
+            logger.info("[phone-reg] phase1.5 r%d 点 Continue with phone", round_idx)
+            _click_button_by_text(page, PHONE_LOGIN_TEXTS, timeout_ms=8000)
+            _sleep(3)
+            last_url = url
+            continue
+
+        # 2) 手机号输入页
+        if has_phone_input:
+            logger.info("[phone-reg] phase1.5 r%d 填手机号 %s", round_idx, phone_e164)
+            try:
+                _select_country(page, country)
+            except Exception:
+                pass
+            local_number = strip_dial_prefix(phone_e164, country)
+            try:
+                _fill_phone_input(page, local_number, phone_e164, country)
+            except Exception as exc:
+                logger.warning("[phone-reg] phase1.5 手机号填写失败(放弃): %s", exc)
+                return False
+            _click_submit_button(page)
+            _sleep(3)
+            wait_cloudflare(page, max_wait_seconds=30)
+            last_url = url
+            continue
+
+        # 3) 密码页(/log-in/password 或含 password 输入框)— 填密码
+        is_pw_page = ("password" in url_low and "add-email" not in url_low) or any(
+            i.get("type") == "password" for i in inputs_info
+        )
+        if is_pw_page:
+            logger.info("[phone-reg] phase1.5 r%d 密码页 — 填密码", round_idx)
+            try:
+                _fill_password_input(page, password)
+            except Exception as exc:
+                logger.warning("[phone-reg] phase1.5 密码填写失败(放弃): %s", exc)
+                return False
+            _sleep(0.5)
+            try:
+                page.keyboard.press("Enter")
+            except Exception:
+                pass
+            _sleep(1)
+            _click_submit_button(page)
+            _sleep(4)
+            wait_cloudflare(page, max_wait_seconds=30)
+            last_url = url
+            continue
+
+        # 4) /add-email — 填邮箱
+        if ("add-email" in url_low or "add_email" in url_low) and not email_submitted:
+            logger.info("[phone-reg] phase1.5 r%d /add-email — 填 %s", round_idx, email_for_bind)
+            try:
+                _fill_add_email(page, email_for_bind)
+            except Exception as exc:
+                logger.warning("[phone-reg] phase1.5 /add-email 填写失败: %s", exc)
+                safe_screenshot(page, SCREENSHOT_DIR / "phone_15_add_email_fill_fail.png")
+                return False
+            _click_submit_button(page)
+            _sleep(4)
+            wait_cloudflare(page, max_wait_seconds=30)
+            _sleep(2)
+            email_submitted = True
+            last_url = url
+            continue
+
+        # 5) /email-verification / OTP 页 — 等 cloud-mail OTP
+        is_email_otp = (
+            "email-verification" in url_low
+            or "email-otp" in url_low
+            or (email_submitted and any(
+                i.get("type") in ("text", "tel", "number") and i.get("name") != "phoneNumberInput"
+                for i in inputs_info
+            ) and ("code" in (body_text or "").lower()
+                   or "verification" in (body_text or "").lower()
+                   or "验证码" in (body_text or "")))
+        )
+        if is_email_otp and not otp_submitted:
+            logger.info("[phone-reg] phase1.5 r%d /email-verification — 等 cloud-mail OTP", round_idx)
+            try:
+                _, mail_code = mail_client.wait_for_otp(
+                    email_for_bind, after_id=mail_baseline_id, timeout=EMAIL_POLL_TIMEOUT,
+                )
+            except Exception as exc:
+                logger.warning("[phone-reg] phase1.5 cloud-mail OTP 超时: %s", exc)
+                safe_screenshot(page, SCREENSHOT_DIR / "phone_15_otp_timeout.png")
+                return False
+            if not _fill_sms_code_smart(page, mail_code):
+                logger.warning("[phone-reg] phase1.5 OTP 填写失败")
+                safe_screenshot(page, SCREENSHOT_DIR / "phone_15_otp_fill_fail.png")
+                return False
+            _click_submit_button(page)
+            _sleep(4)
+            wait_cloudflare(page, max_wait_seconds=30)
+            _sleep(2)
+            otp_submitted = True
+            last_url = url
+            continue
+
+        last_url = url
+
+    logger.warning("[phone-reg] phase1.5 绑邮箱 15 轮超时,放弃。最后 url=%s", page.url)
+    safe_screenshot(page, SCREENSHOT_DIR / "phone_15_timeout.png")
+    return False
+
+
 # ─── Phase 2: auth.openai.com OAuth 阶段 ─────────────────────────────────────
 
 def _phase2_oauth(
@@ -2701,6 +2942,25 @@ def register_phone_and_fetch_bundle(
             order, phone_e164 = _phase1_signup(
                 page, sms_provider, sms_cfg, country, password, full_name, birth,
             )
+
+            # Phase 1.5: 注册后立即绑邮箱(用 phase 1 同一 context 带 cookies)
+            # 不绑邮箱的号在 phase 2 OAuth 时会拿到无效 code → token 交换返
+            # token_exchange_user_error。所以这步是 phase 2 成功的前置条件。
+            phase15_ok = _phase15_bind_email(
+                page,
+                email_for_bind=email,
+                mail_client=mail_client,
+                password=password,
+                phone_e164=phone_e164,
+                country=country,
+            )
+            if phase15_ok:
+                logger.info("[phone-reg] ✅ Phase 1.5 邮箱已绑定,phase 2 可以拿完整 token")
+            else:
+                logger.warning(
+                    "[phone-reg] ⚠️ Phase 1.5 绑邮箱失败 — phase 2 OAuth 大概率会"
+                    "拿到无效 code 或 token_exchange_user_error。继续试,失败就当 phone-only。"
+                )
 
             # ─── Phase 1 → Phase 2 切换:重建 browser context ───
             # Phase1 注册 chatgpt.com 留下了 cookies / localStorage / IndexedDB / Service
