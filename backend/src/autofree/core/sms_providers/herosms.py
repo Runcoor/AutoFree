@@ -280,10 +280,18 @@ class HeroSmsProvider(SmsProvider):
         params: dict = {"service": svc, "country": cid}
         if operator and operator.strip().lower() not in ("", "any"):
             params["operator"] = operator.strip().lower()
-        # max_price=0.028 → 只接 ≤$0.028 的号,贵的拒收(参数名 maxPrice)
+        # max_price=0.028 → 只接 ≤$0.028 的号,贵的拒收(sms-activate 协议 maxPrice)。
+        # 关键:必须同时带 freePrice=true,否则只查「标准价池」(国家+服务的官方底价
+        # 通常很贵,如 Brazil+OpenAI 最低 $0.075),拒收 < $0.075 的请求。
+        # freePrice=true 会进「Free Price 池」(用户挂单价池),$0.028 这种便宜号都在
+        # 这里。currency 默认 840 = USD。
+        # 参考:https://sms-activate.io/blog/free_price_instruction_0623
         if max_price is not None and max_price > 0:
             params["maxPrice"] = f"{max_price:.4f}".rstrip("0").rstrip(".")
-            logger.info("[hero-sms] 限价 maxPrice=$%s", params["maxPrice"])
+            params["freePrice"] = "true"
+            params["currency"] = "840"  # USD,避免被服务端默认成 RUB
+            logger.info("[hero-sms] 限价 maxPrice=$%s freePrice=true currency=USD",
+                        params["maxPrice"])
 
         text = self._api("getNumberV2", params)
 
