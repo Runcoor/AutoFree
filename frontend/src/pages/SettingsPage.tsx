@@ -363,7 +363,7 @@ const SMS_PROVIDER_META: Record<string, {
     label: 'hero-sms',
     countryHint: '英文名,如 england / france / usa(内部翻译为数字 ID)',
     operatorHint: 'any / 留空(hero-sms 默认任意运营商)',
-    maxPriceHint: '最大可接受单价 USD,如 0.030;留空=不限。设值后自动启用 Free Price 池(用户挂单价池,能拿到 $0.028 这种便宜号);留空则只查标准价池(国家+服务有固定底价)',
+    maxPriceHint: '最大可接受单价 USD,如 0.080;留空=不限。注:hero-sms 网页上 $0.025 这种 marketplace 便宜号 API 拿不到;API 真实底价 = freePrice.min(可在 hero-sms 网页或日志「市场预检」中查到,如 Brazil+OpenAI 是 $0.075)',
     countryDefault: 'england',
     operatorDefault: 'any',
     docsUrl: 'https://hero-sms.com/cn/api',

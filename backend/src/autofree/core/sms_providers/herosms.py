@@ -300,19 +300,23 @@ class HeroSmsProvider(SmsProvider):
                     "min": prices[0] if prices else None,
                     "count": op.get("activationsCount") or 0,
                 })
-            # freePrice.min 是平台「建议起步价」(常常等于标准价池底价,如
-            # Brazil+OpenAI 报 $0.075),但 operators[].freePriceOffers 里有更便宜
-            # 的真实库存(any/tim 池可能 $0.03 起 7 万+ 号)。用实际 operator min
-            # 作为「真实市场最低」用于预检。
-            real_min = min((o["min"] for o in ops if o.get("min") is not None), default=None)
+            # hero-sms 是双轨制:
+            #   - handler_api(api_key 鉴权,我们用这个):真实下限是 freePrice.min
+            #   - /api/v1 marketplace(session 登录,网页用户):可到 maxRank /
+            #     operators[].freePriceOffers 的最低价,显著更便宜
+            # API 用户买不到 marketplace 池。所以预检用 freePrice.min 才对。
+            marketplace_min = min(
+                (o["min"] for o in ops if o.get("min") is not None), default=None,
+            )
             return {
                 "min": float(fp.get("min")) if fp.get("min") is not None else None,
                 "default": float(fp.get("default")) if fp.get("default") is not None else None,
                 "avg": float(fp.get("avg")) if fp.get("avg") is not None else None,
                 "maxAvailable": float(fp.get("maxAvailable")) if fp.get("maxAvailable") is not None else None,
+                "maxRank": float(fp.get("maxRank")) if fp.get("maxRank") is not None else None,
                 "totalCount": sum(o.get("count", 0) for o in ops),
                 "operators": ops,
-                "real_min": real_min,
+                "marketplace_min": marketplace_min,
             }
         except Exception as exc:
             logger.debug("[hero-sms] 市场预检失败 svc=%s cid=%s: %s", svc, cid, exc)
@@ -329,41 +333,33 @@ class HeroSmsProvider(SmsProvider):
         if operator and operator.strip().lower() not in ("", "any"):
             params["operator"] = operator.strip().lower()
 
-        # 设了 max_price 时,先用公开 marketplace endpoint 预检 — 避免被 hero-sms
-        # 的 buy API 用 HTTP 400 拒绝,且能给用户清晰的市场价反馈。
+        # 设了 max_price 时,用公开 endpoint 预检 — 避免被 hero-sms HTTP 400 拒绝。
+        # 真实 API 下限是 freePrice.min(不是 operators[].min)— marketplace 那些 $0.03
+        # 的便宜号只能网页登录买,API 拿不到。
         if max_price is not None and max_price > 0:
             market = self._query_market(svc, cid)
             if market:
-                real_min = market.get("real_min")
-                # 输出可买到的运营商池(min ≤ max_price)— 给用户清晰反馈
-                eligible = [o for o in market["operators"]
-                            if o.get("min") is not None and o["min"] <= max_price]
-                eligible_summary = ", ".join(
-                    f"{o['name']} ${o['min']}/{o['count']}号" for o in eligible[:5]
-                ) or "(无)"
+                api_min = market.get("min")  # freePrice.min,API 真实下限
+                mp_min = market.get("marketplace_min")  # operators 最低,仅网页可买
                 logger.info(
-                    "[hero-sms] 市场预检 svc=%s country=%s real_min=$%s 平台建议=$%s "
-                    "总库存=%d 你限价≤$%s 可买池=%s",
-                    svc, cid, real_min, market.get("min"),
-                    market["totalCount"], max_price, eligible_summary,
+                    "[hero-sms] 市场预检 svc=%s country=%s API最低=$%s "
+                    "网页marketplace最低=$%s avg=$%s 你限价=$%s",
+                    svc, cid, api_min, mp_min, market.get("avg"), max_price,
                 )
-                if real_min is not None and max_price < real_min:
+                if api_min is not None and max_price < api_min:
+                    mp_hint = (f"(网页 marketplace 池实际最低 ${mp_min},但 API 拿不到 — "
+                               f"如要 ${mp_min} 这种价位需登录 hero-sms 网页手动买)"
+                               if mp_min is not None and mp_min < api_min else "")
                     raise SmsConfigMissing(
-                        f"[hero-sms] max_price=${max_price} 低于真实市场最低价 "
-                        f"${real_min}(平台建议 ${market.get('min')},avg ${market.get('avg')})— "
-                        f"请调高 max_price 或换国家/服务"
+                        f"[hero-sms] max_price=${max_price} 低于 API 最低价 "
+                        f"${api_min}{mp_hint} — 请调高 max_price 到 ≥${api_min} 或换国家/服务"
                     )
-        # max_price=0.028 → 只接 ≤$0.028 的号,贵的拒收(sms-activate 协议 maxPrice)。
-        # 关键:必须同时带 freePrice=true,否则只查「标准价池」(国家+服务的官方底价
-        # 通常很贵,如 Brazil+OpenAI 最低 $0.075),拒收 < $0.075 的请求。
-        # freePrice=true 会进「Free Price 池」(用户挂单价池),$0.028 这种便宜号都在
-        # 这里。currency 默认 840 = USD。
-        # 参考:https://sms-activate.io/blog/free_price_instruction_0623
+        # max_price=0.080 → 只接 ≤$0.080 的号,贵的拒收(sms-activate 协议 maxPrice)。
+        # 注意:hero-sms 不开放 marketplace 给 handler_api,API 真实下限 = freePrice.min
+        # (实测带 freePrice=true 没用)。网页上 $0.025 的便宜号 API 拿不到。
         if max_price is not None and max_price > 0:
             params["maxPrice"] = f"{max_price:.4f}".rstrip("0").rstrip(".")
-            params["freePrice"] = "true"
-            params["currency"] = "840"  # USD,避免被服务端默认成 RUB
-            logger.info("[hero-sms] 限价 maxPrice=$%s freePrice=true currency=USD",
+            logger.info("[hero-sms] 限价 maxPrice=$%s (注:marketplace 价不在 API 范围)",
                         params["maxPrice"])
 
         text = self._api("getNumberV2", params)
