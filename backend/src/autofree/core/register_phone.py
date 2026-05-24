@@ -1831,12 +1831,21 @@ def _phase1_signup(
                 "[phone-reg] [DIAG] phase1 r%d 命中创建密码页(#%d) url=%s pw_kind=%s",
                 round_idx, diag_counts["pw_hit"], url[:80], pw_kind,
             )
+            # 1. 填密码(JS focus + keyboard.type,React Aria 兼容)
             _fill_password_input(page, password)
-            # 等 Continue 按钮启用 — OpenAI 前端可能异步校验密码,disabled 时点了等于没点
+            _sleep(0.5)
+            # 2. 等 Continue 按钮启用(密码异步校验) — 5s 足够
             _wait_continue_enabled(page, max_wait_s=5)
+            # 3. 双重提交:先 Enter 键(OpenAI 表单普遍支持),再点 Continue 兜底
+            try:
+                page.keyboard.press("Enter")
+                logger.info("[phone-reg] phase1 r%d 密码已填,按 Enter 提交", round_idx)
+            except Exception:
+                pass
+            _sleep(1)
             clicked = _click_submit_button(page)
             if not clicked:
-                logger.warning("[phone-reg] phase1 r%d Continue 按钮没找到 / 全 disabled", round_idx)
+                logger.warning("[phone-reg] phase1 r%d Continue 按钮没找到 / 全 disabled — 靠 Enter 兜底", round_idx)
             _sleep(3)
             # 检测是否真的跳走了 — URL 短时间内变化才算成功提交
             url_after = ""
@@ -1854,6 +1863,25 @@ def _phase1_signup(
                     "[phone-reg] phase1 r%d 密码提交后 10s 内 URL 没变 — 可能 Continue 没生效或后端慢",
                     round_idx,
                 )
+                # 诊断:dump 当前所有按钮 + 错误文案,帮排查为啥没跳走
+                try:
+                    diag_btns = page.evaluate(
+                        """() => Array.from(document.querySelectorAll('button')).map(b => ({
+                            text: (b.innerText || '').trim().slice(0, 40),
+                            type: b.getAttribute('type') || '',
+                            disabled: b.disabled,
+                            ariaLabel: b.getAttribute('aria-label') || '',
+                        }))"""
+                    )
+                    diag_body = page.evaluate(
+                        "() => (document.body && document.body.innerText || '').slice(0, 400)"
+                    )
+                    logger.warning(
+                        "[phone-reg] [DIAG] 卡密码页 r%d 全量按钮 dump: %s | body[:400]=%r",
+                        round_idx, diag_btns[:20], diag_body[:400],
+                    )
+                except Exception:
+                    pass
             wait_cloudflare(page, max_wait_seconds=30)
             _sleep(2)
             last_url = url
