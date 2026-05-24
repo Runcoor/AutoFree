@@ -159,6 +159,7 @@ def safe_screenshot(page, path: Path) -> None:
 
     这样所有散落代码里的 `SCREENSHOT_DIR / "01_xxx.png"` 等调用,在 register_account
     / fetch_personal_bundle 期间都会被自动重写到 per-email 子目录,无需改调用点。
+    失败 log WARNING(原 debug 太隐蔽 — 截图静默丢了排错很麻烦)。
     """
     try:
         override = _CURRENT_SS_DIR.get()
@@ -168,7 +169,7 @@ def safe_screenshot(page, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         page.screenshot(path=str(path), full_page=True)
     except Exception as exc:
-        logger.debug("[browser] 截图失败 %s: %s", path, exc)
+        logger.warning("[browser] 截图失败 %s: %s", path, exc)
 
 
 @contextmanager

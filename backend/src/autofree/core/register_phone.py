@@ -1753,6 +1753,9 @@ def _phase1_signup(
     last_url = ""
     # 诊断计数:Phase 1 是否真的走过密码页 / about-you 等
     diag_counts = {"pw_hit": 0, "about_you_hit": 0, "fallback_hit": 0, "rounds": 0}
+    # 每号(每个 order)是否已主动点过 Resend — SMS#2 经验:OpenAI 这一步若不主动点
+    # Resend,provider 可能永远等不到下一条 SMS。所以进 SMS 页等 15s 没收到就点 Resend。
+    resend_clicked_for: set[int] = set()
     # 主循环里 SMS 验证页换号次数(场景:phone → 密码 → about-you → SMS code,
     # 这种 SMS 验证是在主循环里等的,跟上面的 SMS retry 循环分开计数)
     main_sms_attempts = 0
@@ -1775,13 +1778,14 @@ def _phase1_signup(
             last_url = ""
             continue
 
-        # 诊断:每轮记录 url + input 摘要(只有 url 变化才打印,避免刷屏)
+        # 诊断:每轮记录 url + input 摘要(只有 url 变化才打印,避免刷屏)+ 每次 URL 变化都拍一张
         if url != last_url:
             input_types = [i.get("type") for i in inputs_info if i.get("type")]
             logger.info(
                 "[phone-reg] [DIAG] phase1 r%d url=%s inputs=%s body[:120]=%r",
                 round_idx, url[:120], input_types[:8], (body_text or "")[:120],
             )
+            safe_screenshot(page, SCREENSHOT_DIR / f"phone_main_r{round_idx:02d}_state.png")
 
         # 完成:落 chatgpt.com 主页
         if "chatgpt.com" in url and "auth.openai.com" not in url and "/auth/" not in url:
@@ -1799,8 +1803,22 @@ def _phase1_signup(
             safe_screenshot(page, SCREENSHOT_DIR / "phone_09_chatgpt_landing.png")
             return order, phone_e164
 
-        is_pw_page = ("password" in url) or any(i.get("type") == "password" for i in inputs_info)
-        if last_url == url and not is_pw_page:
+        # ★ 先识别 SMS#2 验证页(URL 可能含 "password" 如 /create-account/password/sms-verify,
+        # 但 body 已是「Check your phone」)。识别成功 → is_pw_page 必为 False。
+        body_low = (body_text or "").lower()
+        is_sms_body = (
+            "check your phone" in body_low
+            or "enter the verification" in body_low
+            or "verification code" in body_low
+            or "请输入验证码" in (body_text or "")
+            or "输入验证码" in (body_text or "")
+        )
+        has_pw_input = any(i.get("type") == "password" for i in inputs_info)
+        # is_pw_page 必须 (有 type=password 输入框) OR (URL 含 password 且 body 有密码字眼);
+        # 且 body 不是 SMS 验证页。仅 URL 字符串不再算密码页 — 避免把 SMS#2 误判。
+        url_says_pw = ("password" in url) and ("password" in body_low or "密码" in (body_text or ""))
+        is_pw_page = (not is_sms_body) and (has_pw_input or url_says_pw)
+        if last_url == url and not is_pw_page and not is_sms_body:
             continue
 
         # 密码页分类(主循环必走) — URL /log-in/password OR body 含「Enter your password」/
@@ -1868,6 +1886,7 @@ def _phase1_signup(
                     "[phone-reg] phase1 r%d 密码提交后 10s 内 URL 没变 — 可能 Continue 没生效或后端慢",
                     round_idx,
                 )
+                safe_screenshot(page, SCREENSHOT_DIR / f"phone_main_pw_no_advance_r{round_idx}.png")
                 # 诊断:dump 当前所有按钮 + 错误文案,帮排查为啥没跳走
                 try:
                     diag_btns = page.evaluate(
@@ -1917,16 +1936,68 @@ def _phase1_signup(
             for i in inputs_info
         )
         if is_sms_page:
-            logger.info("[phone-reg] phase1 r%d 命中 SMS 验证页,等 SMS#1 order=%d",
+            logger.info("[phone-reg] phase1 r%d 命中 SMS 验证页 order=%d — 拍照 + 等 15s 后若无码点 Resend",
                         round_idx, order.id)
+            safe_screenshot(page, SCREENSHOT_DIR / f"phone_main_sms_enter_r{round_idx}.png")
+            # 策略:先等 15s 看 OpenAI 自动发的 SMS#2 来不来 → 没来则点 Resend,再等剩余 105s
+            initial_wait = 15
+            code = None
             try:
                 code = sms_provider.wait_for_otp(
-                    order_id=order.id, timeout=SMS_WAIT_SECONDS,
+                    order_id=order.id, timeout=initial_wait,
                     should_stop=is_stop_requested,
                 )
             except sms_mod.SmsAborted:
                 raise BatchStopped("phone reg phase1 SMS 等待时收到 stop")
-            except sms_mod.SmsTimeout as exc:
+            except sms_mod.SmsTimeout:
+                # 没收到 → 点 Resend(每号只点一次)
+                if order.id not in resend_clicked_for:
+                    try:
+                        clicked = page.evaluate(
+                            """() => {
+                                const btns = document.querySelectorAll(
+                                    'button, a, [role="button"]'
+                                );
+                                for (const b of btns) {
+                                    const t = (b.innerText || '').trim().toLowerCase();
+                                    if (t.includes('resend') || t.includes('重新发送') || t.includes('重发')) {
+                                        b.click();
+                                        return t.slice(0, 60);
+                                    }
+                                }
+                                return '';
+                            }"""
+                        )
+                        if clicked:
+                            logger.info("[phone-reg] phase1 r%d ✅ 点 Resend(%s) order=%d",
+                                        round_idx, clicked, order.id)
+                            resend_clicked_for.add(order.id)
+                            safe_screenshot(
+                                page, SCREENSHOT_DIR / f"phone_main_sms_resend_r{round_idx}.png",
+                            )
+                        else:
+                            logger.warning("[phone-reg] phase1 r%d Resend 按钮没找到", round_idx)
+                    except Exception as exc:
+                        logger.warning("[phone-reg] phase1 r%d 点 Resend 异常: %s", round_idx, exc)
+                else:
+                    logger.info("[phone-reg] phase1 r%d order=%d Resend 已点过,继续等",
+                                round_idx, order.id)
+                # 继续等剩余预算(SMS_WAIT_SECONDS - initial_wait = 105s)
+                try:
+                    code = sms_provider.wait_for_otp(
+                        order_id=order.id,
+                        timeout=max(SMS_WAIT_SECONDS - initial_wait, 30),
+                        should_stop=is_stop_requested,
+                    )
+                except sms_mod.SmsAborted:
+                    raise BatchStopped("phone reg phase1 SMS 等待时收到 stop")
+                except sms_mod.SmsTimeout as exc:
+                    # 真的没来 — 落入原 ban 换号流程
+                    code = None
+                    sms_timeout_exc = exc
+            if code is None:
+                exc = locals().get("sms_timeout_exc")
+                safe_screenshot(page, SCREENSHOT_DIR / f"phone_main_sms_timeout_r{round_idx}.png")
                 main_sms_attempts += 1
                 logger.warning(
                     "[phone-reg] phase1 r%d 主循环 SMS 超时 %ds order=%d — ban 换号 "
