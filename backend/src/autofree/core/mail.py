@@ -242,12 +242,31 @@ class MailClient:
         timeout = timeout or EMAIL_POLL_TIMEOUT
         start = time.time()
         last_log = 0.0
+        # 诊断:记录每轮见到的邮件 id 集合 — 仅在变化时打印,避免刷屏
+        seen_ids: set[int] = set()
+        logger.info("[mail] 开始等 OTP to=%s after_id=%s timeout=%ds",
+                    to_email, after_id, timeout)
         while time.time() - start < timeout:
             try:
                 mails = self.list_mails(to_email, size=10)
             except Exception as exc:
                 logger.warning("[mail] 轮询异常,重试: %s", exc)
                 mails = []
+            # 诊断:邮件列表变化时记录一下,看 cloud-mail 实际收到了啥
+            current_ids = {(m.get("id") or 0) for m in mails}
+            new_ids = current_ids - seen_ids
+            if new_ids:
+                for m in mails:
+                    mid = m.get("id") or 0
+                    if mid in new_ids:
+                        logger.info(
+                            "[mail] 新邮件 id=%s from=%r subject=%r to=%r body_len=%d",
+                            mid, (m.get("from") or "")[:60],
+                            (m.get("subject") or "")[:60],
+                            to_email,
+                            len((m.get("text") or "") + (m.get("html") or "")),
+                        )
+                seen_ids |= current_ids
             for m in mails:
                 mid = m.get("id") or 0
                 if mid <= after_id:
@@ -258,12 +277,30 @@ class MailClient:
                 if code:
                     logger.info("[mail] OTP 命中 id=%s subject=%r code=%s", mid, m.get("subject", "")[:40], code)
                     return mid, code
+                else:
+                    # 邮件 id > after_id 但 OTP 没提取出来 — 关键诊断
+                    body_snippet = ((m.get("text") or "")[:200]
+                                    or _html_to_text(m.get("html") or "")[:200])
+                    logger.warning(
+                        "[mail] id=%s 邮件不含 6 位 OTP — subject=%r body[:200]=%r",
+                        mid, (m.get("subject") or "")[:60], body_snippet,
+                    )
             now = time.time()
             if now - last_log > 5:
                 elapsed = int(now - start)
-                logger.info("[mail] 等待 OTP... (%ds)", elapsed)
+                logger.info("[mail] 等待 OTP... (%ds) 见到邮件数=%d", elapsed, len(seen_ids))
                 last_log = now
             time.sleep(EMAIL_POLL_INTERVAL)
+        # 超时时 dump 最后一次邮件列表 — 看 cloud-mail 到底有没有这封邮件
+        try:
+            final_mails = self.list_mails(to_email, size=10)
+            logger.warning(
+                "[mail] OTP 超时 — to=%s 收件箱共 %d 封,ids=%s",
+                to_email, len(final_mails),
+                [m.get("id") for m in final_mails],
+            )
+        except Exception:
+            pass
         raise TimeoutError(f"等待 {to_email} 的 OTP 超时 ({timeout}s)")
 
     def latest_mail_id(self, to_email: str) -> int:
