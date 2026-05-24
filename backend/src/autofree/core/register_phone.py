@@ -788,7 +788,12 @@ def _select_country(page: Page, country: PhoneCountry) -> bool:
 # ─── SMS 订单管理 ───────────────────────────────────────────────────────────
 
 def _buy_phone_order(sms_provider, sms_cfg: dict, attempt_idx: int) -> Any:
-    """买 SMS 号 — 任何失败/库存空抛 SmsBuyFailed,上层重试。"""
+    """买 SMS 号 — 任何失败/库存空抛 SmsBuyFailed,上层重试。
+
+    保护层:provider 实现里 HTTP 404 / 网络异常等通用错误抛的是 SmsError(父类),
+    这里捕获后转成 SmsBuyFailed,统一让 phase1 retry 循环吃下,不要冒泡到 batch
+    被当作「未预期异常 → oauth_failed」(NO_NUMBERS 是可重试的临时问题)。
+    """
     country = sms_cfg.get("country") or sms_provider.DEFAULT_COUNTRY
     operator = sms_cfg.get("operator") or sms_provider.DEFAULT_OPERATOR
     service = sms_cfg.get("service") or sms_provider.DEFAULT_SERVICE
@@ -803,9 +808,21 @@ def _buy_phone_order(sms_provider, sms_cfg: dict, attempt_idx: int) -> Any:
         attempt_idx, sms_provider.PROVIDER_NAME, country, operator, service,
         f"${max_price}" if max_price else "不限",
     )
-    return sms_provider.buy_activation(
-        country=country, operator=operator, product=service, max_price=max_price,
-    )
+    try:
+        return sms_provider.buy_activation(
+            country=country, operator=operator, product=service, max_price=max_price,
+        )
+    except (sms_mod.SmsBuyFailed, sms_mod.SmsConfigMissing):
+        raise
+    except sms_mod.SmsError as exc:
+        # provider 通用错误(HTTP 4xx/5xx、网络异常、未识别响应等)— 转可重试
+        msg = str(exc).lower()
+        if any(k in msg for k in ("no_numbers", "no numbers", "numbers not found",
+                                  "out of stock", "no stock")):
+            raise sms_mod.SmsBuyFailed(
+                f"库存空(provider 当下没号 / max_price 太低过滤光了): {exc}"
+            ) from exc
+        raise sms_mod.SmsBuyFailed(f"买号失败(可重试): {exc}") from exc
 
 
 def _safe_refund(sms_provider, order, kind: str = "cancel") -> None:
