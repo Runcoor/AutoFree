@@ -2417,16 +2417,15 @@ def _phase2_oauth(
 
         # 7.5) 「Welcome back / Choose an account」picker
         #
-        # ⚠️ 重要更正(基于 HAR 实测):点已有账号卡片 = OAuth shortcut,
-        # **直接生成 code 跳到 callback,跳过 /add-email**。这样 CPA 拿到的
-        # auth_code 是状态不完整的,token 交换 user_error。
+        # 修复历史:
+        # - 早期点已有账号卡片 → 报「跳过 /add-email」(误判,可能是 phase1 没绑 password 才走快路径)
+        # - 中期点「Log in to another account」→ 启动了**全新 OAuth 实例**,新 state
+        #   ≠ CPA 的 state,回填 CPA 报 404 unknown state(已 HAR 实测验证)
+        # - 现版:**点已有账号卡片**继续当前 OAuth(state 保留)。OpenAI 看 phone-only
+        #   账号会自动跳 /add-email。即使没跳,也至少 state 匹配。
         #
-        # 正确做法(HAR 验证的成功路径):必须走 /log-in-or-create-account →
-        # /log-in/password → /add-email → /email-verification → callback。
-        # 所以 picker 出现 = 我们 cookie 清理没干净,只能尝试:
-        #   1. 点 X 按钮删除该账号卡片(消除 session 后 picker 消失)
-        #   2. 没 X 就点「Log in to another account」走 fresh login
-        # 两条路都引导 OpenAI 走完整登录流程触发 /add-email。
+        # 上策仍是用 fresh context(register_phone_and_fetch_bundle 已实施)避免 picker,
+        # 这里是 picker 万一出现的 fallback。
         try:
             body_text = page.inner_text("body", timeout=1500)[:2000]
         except Exception:
@@ -2434,66 +2433,28 @@ def _phase2_oauth(
         if ("Welcome back" in body_text or "选择账号" in body_text
                 or "Choose an account" in body_text):
             logger.warning(
-                "[phone-reg] phase2 r%d Account picker 出现 — 说明 cookie/storage 清理没干净,"
-                "尝试删除卡片或走 fresh login 触发 /add-email",
+                "[phone-reg] phase2 r%d Account picker 出现 — fresh context 没挡住,"
+                "点已有账号卡片继续当前 OAuth(保留 state,等 /add-email)",
                 round_idx,
             )
             try:
-                # 策略 A:点账号卡片旁的 × 按钮(aria-label="Remove" / 包含 close 字样)
-                # 删除该 session → picker 项消失 → 自动跳到 fresh login
-                x_clicked = page.evaluate(
-                    """() => {
-                        // 找带账号卡片附近的 × / close / remove 按钮
-                        const cards = document.querySelectorAll('li, div, [data-testid]');
-                        for (const card of cards) {
-                            const t = (card.innerText || '').trim();
-                            if (!t || t.length > 200) continue;
-                            if (!t.includes('@') && !/\\+\\d{1,4}/.test(t)) continue;
-                            // 这卡片里找 × 按钮
-                            const xBtns = card.querySelectorAll('button, [role="button"], svg, [aria-label]');
-                            for (const x of xBtns) {
-                                const al = (x.getAttribute('aria-label') || '').toLowerCase();
-                                const tx = (x.innerText || '').trim();
-                                if (al.includes('remove') || al.includes('delete') || al.includes('close') ||
-                                    al.includes('删除') || al.includes('移除') ||
-                                    tx === '×' || tx === '✕' || tx === 'X') {
-                                    const r = x.getBoundingClientRect();
-                                    if (r.width > 0 && r.height > 0) {
-                                        x.scrollIntoView({block: 'center'});
-                                        x.click();
-                                        return (al || tx || '×').slice(0, 40);
-                                    }
-                                }
-                            }
-                        }
-                        return null;
-                    }"""
-                )
-                if x_clicked:
-                    logger.info("[phone-reg] picker 点中 × 删除卡片: %r — 等 picker 消失",
-                                x_clicked)
-                    _sleep(3)
-                    last_url = url
-                    continue
-
-                # 策略 B:点「Log in to another account」走 fresh login
-                logger.warning("[phone-reg] picker 找不到 × 按钮,改点「Log in to another account」")
                 clicked = page.evaluate(
                     """() => {
-                        const wantTexts = [
-                            'log in to another account', 'use another account',
-                            'use a different account', 'sign in to another account',
-                            '使用另一个账号', '另一个账号', '其他账号', '换个账号',
-                        ];
+                        const skip = ['log in to another', 'use another', 'use a different',
+                                      'sign in to another', '另一个账号', '其他账号', '换个账号',
+                                      'create account', '创建账号', 'log out', '登出', 'sign up',
+                                      'terms of use', 'privacy policy', '使用条款', '隐私政策'];
                         const cands = document.querySelectorAll(
-                            'button, a, li, [role="button"]'
+                            'button, a, li, div[role="button"], [data-testid]'
                         );
                         for (const el of cands) {
                             const r = el.getBoundingClientRect();
                             if (r.width <= 0 || r.height <= 0) continue;
                             const t = (el.innerText || '').trim().toLowerCase();
-                            if (!t) continue;
-                            if (wantTexts.some(w => t.includes(w))) {
+                            if (!t || t.length > 200) continue;
+                            if (skip.some(s => t.includes(s))) continue;
+                            // 账号卡片特征:含邮箱 @ 或国际电话 +<digits>
+                            if (t.includes('@') || /\\+\\d{1,4}/.test(t)) {
                                 el.scrollIntoView({ block: 'center' });
                                 el.click();
                                 return t.slice(0, 80);
@@ -2503,14 +2464,13 @@ def _phase2_oauth(
                     }"""
                 )
                 if clicked:
-                    logger.info("[phone-reg] picker 点中: %r — 走 fresh login", clicked)
+                    logger.info("[phone-reg] picker 点中账号卡片: %r — 继续当前 OAuth,等 /add-email",
+                                clicked)
                     _sleep(3)
                     last_url = url
                     continue
-
                 logger.error(
-                    "[phone-reg] picker 处理失败:× 按钮 + Log in to another 都没找到 — "
-                    "OAuth 大概率会撞 shortcut 跳过 /add-email"
+                    "[phone-reg] picker 没找到账号卡片(可能 UI 变了)— OAuth 流程可能卡住"
                 )
             except Exception as exc:
                 logger.warning("[phone-reg] account picker 处理异常: %s", exc)
@@ -2618,6 +2578,9 @@ def register_phone_and_fetch_bundle(
     with email_screenshot_scope(email) as ss_dir, sync_playwright() as p:
         logger.info("[phone-reg] 截图目录: %s", ss_dir)
         browser = p.chromium.launch(**launch_kwargs)
+        # Phase 1 用 context1;Phase 2 用全新 context2,跟 phase1 完全隔离,
+        # 避免 OpenAI 通过 cookie/storage/fingerprint 复用 phase1 的 session
+        # 导致 picker shortcut + state 重置
         context = browser.new_context(**get_context_options())
         page = context.new_page()
 
@@ -2636,17 +2599,23 @@ def register_phone_and_fetch_bundle(
                 return True
             return False
 
-        page.on("request", lambda req: _try_extract_code(req.url, "request"))
-        page.on("requestfailed", lambda req: _try_extract_code(req.url, "requestfailed"))
-        page.on("response", lambda res: _try_extract_code(res.url, "response"))
-        page.on("framenavigated", lambda f: _try_extract_code(f.url, "framenav"))
+        # 引用容器,phase2 重建 page 后能更新内部指针
+        page_ref: list[Any] = [page]
 
         def _capture() -> bool:
             try:
-                _try_extract_code(page.url or "", "live_url")
+                _try_extract_code(page_ref[0].url or "", "live_url")
             except Exception:
                 pass
             return auth_code[0] is not None
+
+        def _attach_capture_handlers(target_page) -> None:
+            target_page.on("request", lambda req: _try_extract_code(req.url, "request"))
+            target_page.on("requestfailed", lambda req: _try_extract_code(req.url, "requestfailed"))
+            target_page.on("response", lambda res: _try_extract_code(res.url, "response"))
+            target_page.on("framenavigated", lambda f: _try_extract_code(f.url, "framenav"))
+
+        _attach_capture_handlers(page)
 
         try:
             # Phase 1: chatgpt.com 手机号注册
@@ -2665,7 +2634,23 @@ def register_phone_and_fetch_bundle(
                 logger.info("[phone-reg] phase1 完成,刚向 CPA 取到新 auth_url state=%s",
                             cpa_state[:8])
 
-            # Phase 2: auth.openai.com OAuth
+            # ─── Phase 1 → Phase 2 切换:重建 browser context ───
+            # Phase1 注册 chatgpt.com 留下了 cookies / localStorage / IndexedDB / Service
+            # Worker / WebGL fingerprint cache 等大量 session 痕迹。即使清掉,OpenAI 后端
+            # 可能通过 IP + 浏览器指纹 仍能识别 → 出 picker shortcut → state 被重置 →
+            # CPA 回填 404。彻底解决:关闭 phase1 的 context,开全新的 context2,跟
+            # phase1 完全隔离,等同于"换浏览器"。
+            try:
+                context.close()
+                logger.info("[phone-reg] phase1 context 已关闭,phase2 用全新 context")
+            except Exception as exc:
+                logger.warning("[phone-reg] 关 phase1 context 失败(继续): %s", exc)
+            context = browser.new_context(**get_context_options())
+            page = context.new_page()
+            page_ref[0] = page
+            _attach_capture_handlers(page)
+
+            # Phase 2: auth.openai.com OAuth — 用全新 context
             email_bound = _phase2_oauth(
                 page, auth_url, sms_provider, order, country, phone_e164,
                 email_for_bind=email, mail_client=mail_client,
