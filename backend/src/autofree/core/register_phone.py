@@ -2059,14 +2059,52 @@ def _phase2_oauth(
         logger.info("[phone-reg] 已清 OpenAI/ChatGPT 域 cookies(共 %d 条)— 强制 phase2 走完整登录触发 /add-email", cleared)
     except Exception as exc:
         logger.warning("[phone-reg] 清 cookies 失败(继续,但 picker 可能出现): %s", exc)
-    # 顺手清掉 localStorage / sessionStorage(OpenAI 也用它存 session)。
-    # 必须在 *.openai.com 域上下文里清才有效 — 现在 page 还在 chatgpt.com,先 goto 一个轻 OpenAI 页
+    # 顺手清掉 localStorage / sessionStorage / IndexedDB / Cache Storage —
+    # OpenAI 把 OAuth session 散放在这些地方,只清 cookie 不够。必须在 *.openai.com /
+    # chatgpt.com 域上下文里清才有效 — 现在 page 还在 chatgpt.com,先 goto 各 OpenAI 域
+    _CLEAR_STORAGE_JS = """
+        () => {
+            const r = { ls: 0, ss: 0, idb: [], cache: 0 };
+            try {
+                r.ls = localStorage.length;
+                localStorage.clear();
+            } catch(e) {}
+            try {
+                r.ss = sessionStorage.length;
+                sessionStorage.clear();
+            } catch(e) {}
+            // IndexedDB:列出所有 db 并 delete
+            try {
+                if (indexedDB.databases) {
+                    return indexedDB.databases().then(dbs => {
+                        const promises = dbs.map(db => new Promise(res => {
+                            try {
+                                const req = indexedDB.deleteDatabase(db.name);
+                                req.onsuccess = req.onerror = req.onblocked = () => res(db.name);
+                            } catch(e) { res(null); }
+                        }));
+                        return Promise.all(promises).then(names => {
+                            r.idb = names.filter(Boolean);
+                            // Cache Storage(Service Worker 缓存)
+                            return (typeof caches !== 'undefined' && caches.keys ? caches.keys() : Promise.resolve([]))
+                                .then(keys => Promise.all(keys.map(k => caches.delete(k))).then(() => {
+                                    r.cache = keys.length;
+                                    return r;
+                                }));
+                        });
+                    });
+                }
+            } catch(e) {}
+            return r;
+        }
+    """
     for origin in ("https://chatgpt.com/", "https://auth.openai.com/"):
         try:
             page.goto(origin, wait_until="domcontentloaded", timeout=15000)
-            page.evaluate("() => { try { localStorage.clear(); sessionStorage.clear(); } catch(e) {} }")
-        except Exception:
-            pass
+            cleared_info = page.evaluate(_CLEAR_STORAGE_JS)
+            logger.info("[phone-reg] 已清 %s 上的存储: %s", origin, cleared_info)
+        except Exception as exc:
+            logger.warning("[phone-reg] 清 %s 存储失败: %s", origin, exc)
 
     page.goto(auth_url, wait_until="domcontentloaded", timeout=60000)
     _sleep(3)
@@ -2495,31 +2533,26 @@ def register_phone_and_fetch_bundle(
 
     # ── 决定 OAuth 走哪条路径 ──
     # 1) CPA 配置可用 → 走 CPA OAuth(用 CPA 的 PKCE,callback 回填 CPA,AutoFree 不存 token)
-    # 2) CPA 没配 / 取 auth_url 失败 → 走 AutoFree PKCE(老路径,本地存 token,后续 cpa_push)
-    from autofree.core.cpa_sync import get_codex_auth_url, is_cpa_configured, submit_oauth_callback
+    # 2) CPA 没配 → 走 AutoFree PKCE(老路径,本地存 token,后续 cpa_push)
+    # CPA 的 state TTL 很短(5min 左右),phase1 注册要花 3-5min,如果在开头取 auth_url
+    # 到 phase2 时 state 已过期 → 回填 CPA 返 404 "unknown or expired state"。
+    # 所以 CPA 模式只在开头**决定**走哪条路径,真正的 auth_url 拖到 phase1 完成后再取。
+    from autofree.core.cpa_sync import is_cpa_configured
 
     use_cpa_oauth = is_cpa_configured()
     cpa_state = ""
-    if use_cpa_oauth:
-        ok, payload = get_codex_auth_url()
-        if ok and isinstance(payload, dict):
-            auth_url = payload["url"]
-            cpa_state = payload["state"]
-            logger.info("[phone-reg] === CPA OAuth 模式 === state=%s", cpa_state[:8])
-        else:
-            logger.warning(
-                "[phone-reg] CPA 已配但取 auth_url 失败: %s — 回退 AutoFree PKCE 模式",
-                payload,
-            )
-            use_cpa_oauth = False
 
+    # AutoFree PKCE 模式提前生成 auth_url(state 不会过期);CPA 模式占位,phase1 后取
     if not use_cpa_oauth:
-        # AutoFree PKCE 模式 — 自己生成 PKCE + auth_url,token 交换后存本地
         code_verifier, code_challenge = _pkce()
         state = secrets.token_urlsafe(16)
         auth_url = _build_auth_url(code_challenge, state)
         logger.info("[phone-reg] === AutoFree PKCE 模式 === state=%s redirect=%s",
                     state[:8], CODEX_REDIRECT_URI)
+    else:
+        auth_url = ""  # phase1 之后再向 CPA 取
+        code_verifier = ""  # CPA 模式我们不持 verifier
+        logger.info("[phone-reg] === CPA OAuth 模式 === auth_url 将在 phase1 完成后再取(避免 state 过期)")
 
     logger.info(
         "[phone-reg] 启动 email=%s provider=%s sms_country=%s phone_country=ISO=%s dial=+%s mode=%s",
@@ -2584,6 +2617,17 @@ def register_phone_and_fetch_bundle(
                 page, sms_provider, sms_cfg, country, password, full_name, birth,
             )
 
+            # CPA 模式:phase1 完成后才向 CPA 取 auth_url,缩短 state 持有时间到 phase2 内
+            if use_cpa_oauth:
+                from autofree.core.cpa_sync import get_codex_auth_url
+                ok, payload = get_codex_auth_url()
+                if not ok or not isinstance(payload, dict):
+                    raise OAuthFailed(f"CPA /codex-auth-url 取 URL 失败: {payload}")
+                auth_url = payload["url"]
+                cpa_state = payload["state"]
+                logger.info("[phone-reg] phase1 完成,刚向 CPA 取到新 auth_url state=%s",
+                            cpa_state[:8])
+
             # Phase 2: auth.openai.com OAuth
             email_bound = _phase2_oauth(
                 page, auth_url, sms_provider, order, country, phone_e164,
@@ -2609,6 +2653,7 @@ def register_phone_and_fetch_bundle(
 
             if use_cpa_oauth:
                 # ── CPA OAuth 模式 ── 把完整 callback URL 回填给 CPA,让 CPA 自己换 token
+                from autofree.core.cpa_sync import submit_oauth_callback
                 callback_url = full_callback_url[0] or ""
                 if not callback_url:
                     raise OAuthFailed("CPA 模式但 full_callback_url 为空")
@@ -2616,6 +2661,13 @@ def register_phone_and_fetch_bundle(
                             cpa_state[:8], callback_url[:120])
                 ok_post, msg_post = submit_oauth_callback(callback_url)
                 if not ok_post:
+                    # CPA state 过期是已知失败:phase1+phase2 太慢,CPA 已忘了这个 state
+                    if "expired" in msg_post.lower() or "404" in msg_post:
+                        logger.error(
+                            "[phone-reg] CPA state 过期(%s)— 整个流程花了 >CPA 的 state TTL。"
+                            "考虑加快 phase1 或要求 CPA 延长 TTL",
+                            msg_post,
+                        )
                     raise OAuthFailed(f"回填 CPA /oauth-callback 失败: {msg_post}")
                 logger.info("[phone-reg] ✅ CPA 已收 callback: %s", msg_post)
 
