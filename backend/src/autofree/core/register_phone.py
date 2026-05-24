@@ -214,6 +214,37 @@ def _wait_button_by_text(page: Page, candidates: tuple[str, ...], *, timeout_ms:
     return False
 
 
+def _wait_continue_enabled(page: Page, max_wait_s: float = 5.0) -> bool:
+    """等页面上 type=submit 或文本含 Continue/继续 的按钮变成 enabled。
+
+    OpenAI 密码页填密码后,前端异步校验复杂度(8位+大小写+数字),通过前
+    Continue 按钮 disabled。此时点击等于没点。本函数轮询等启用,超时返 False
+    但调用方仍可尝试点(也许文本不匹配但能强点)。
+    """
+    deadline = time.monotonic() + max_wait_s
+    while time.monotonic() < deadline:
+        try:
+            enabled = page.evaluate(
+                """(texts) => {
+                    const all = document.querySelectorAll('button[type="submit"], button');
+                    for (const b of all) {
+                        if (b.disabled) continue;
+                        const t = (b.innerText || '').trim();
+                        if (!t) continue;
+                        if (texts.some(tx => t === tx || t.includes(tx))) return true;
+                    }
+                    return false;
+                }""",
+                ["Continue", "继续", "Next", "下一步"],
+            )
+            if enabled:
+                return True
+        except Exception:
+            pass
+        _sleep(0.3)
+    return False
+
+
 def _click_submit_button(page: Page) -> bool:
     """点页面上的「继续 / Continue / Next」提交按钮(优先 type=submit)。"""
     try:
@@ -1785,14 +1816,45 @@ def _phase1_signup(
 
         if is_pw_page:
             diag_counts["pw_hit"] += 1
+            # 同一 URL 上连续填密码 > 3 次 = 卡死(Continue 没起作用),立刻 abort
+            # 不能让主循环傻等 20 轮 × 65s ≈ 22min
+            if last_url == url and diag_counts["pw_hit"] >= 3:
+                safe_screenshot(page, SCREENSHOT_DIR / f"phone_pw_stuck_r{round_idx}.png")
+                logger.error(
+                    "[phone-reg] phase1 r%d 密码页连续 %d 次同 URL 都没跳走 — Continue 点击无效,abort",
+                    round_idx, diag_counts["pw_hit"],
+                )
+                raise RegisterFailed(
+                    f"创建密码页卡死({diag_counts['pw_hit']} 次同 URL) — Continue 按钮无响应"
+                )
             logger.info(
                 "[phone-reg] [DIAG] phase1 r%d 命中创建密码页(#%d) url=%s pw_kind=%s",
                 round_idx, diag_counts["pw_hit"], url[:80], pw_kind,
             )
             _fill_password_input(page, password)
-            _click_submit_button(page)
+            # 等 Continue 按钮启用 — OpenAI 前端可能异步校验密码,disabled 时点了等于没点
+            _wait_continue_enabled(page, max_wait_s=5)
+            clicked = _click_submit_button(page)
+            if not clicked:
+                logger.warning("[phone-reg] phase1 r%d Continue 按钮没找到 / 全 disabled", round_idx)
             _sleep(3)
-            wait_cloudflare(page, max_wait_seconds=60)
+            # 检测是否真的跳走了 — URL 短时间内变化才算成功提交
+            url_after = ""
+            for _ in range(10):  # 等最多 10s
+                try:
+                    url_after = (page.url or "").lower()
+                except Exception:
+                    url_after = ""
+                if url_after and url_after != url:
+                    logger.info("[phone-reg] phase1 r%d 密码提交后已跳走 → %s", round_idx, url_after[:80])
+                    break
+                _sleep(1)
+            else:
+                logger.warning(
+                    "[phone-reg] phase1 r%d 密码提交后 10s 内 URL 没变 — 可能 Continue 没生效或后端慢",
+                    round_idx,
+                )
+            wait_cloudflare(page, max_wait_seconds=30)
             _sleep(2)
             last_url = url
             continue
