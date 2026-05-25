@@ -2228,14 +2228,20 @@ def _phase15_bind_email(
     号当 phone-only pending 入库,用户可以走「补绑邮箱」按钮重试)。这步是
     best-effort,不阻塞主流程。
 
-    单次尝试,60s 超时直接放弃 — 之前的「换邮箱重试」证实没用(OpenAI 是页面
-    层面不发,跟邮箱无关),所以不再浪费 cloud-mail 配额。
+    单次尝试,60s 超时直接放弃。
+
+    ★ v2 (2026-05-25):入口 URL 从 /add-email 改成 OAuth URL(同 phase 2)。
+    原因:OpenAI 的 /add-email/send 后端校验 session 必须最近做过 password/verify
+    (用户手动对比验证),否则返 200 但 silent drop 不发邮件。
+    走 OAuth URL → /log-in → 填 phone → /log-in/password → 填密码 → POST
+    /password/verify → 自动落 /add-email → submit → 邮件秒到。
+    完全模仿用户手动操作的请求链。
     """
     OTP_TIMEOUT_S = 60          # 60s 收不到就放弃,phase 2 兜底
 
     current_email = email_for_bind
     current_address_id = address_id_for_bind
-    logger.info("[phone-reg] === Phase 1.5 绑邮箱 === email=%s", current_email)
+    logger.info("[phone-reg] === Phase 1.5 绑邮箱(v2 经 OAuth)=== email=%s", current_email)
     safe_screenshot(page, SCREENSHOT_DIR / "phone_15_pre_bind_email.png")
 
     # cloud-mail baseline:绑后 OTP 不抓老邮件
@@ -2245,12 +2251,19 @@ def _phase15_bind_email(
         logger.warning("[phone-reg] phase1.5 取 cloud-mail baseline 失败(继续): %s", exc)
         mail_baseline_id = None
 
+    # ★ 不直 goto /add-email — 必须走 OAuth URL 触发 password_verify
+    # PKCE/state 是 phase 1.5 内部用的,跟 phase 2 的独立 — phase 2 后续清 cookies
+    # 重启一份新 OAuth 流程,所以这里的 code 不会被复用。
+    code_verifier, code_challenge = _pkce()
+    state = secrets.token_urlsafe(16)
+    auth_url = _build_auth_url(code_challenge, state)
+    logger.info("[phone-reg] phase1.5 入口 OAuth URL state=%s", state[:8])
     try:
-        page.goto("https://auth.openai.com/add-email", wait_until="load", timeout=30000)
+        page.goto(auth_url, wait_until="load", timeout=30000)
         _sleep(2)
         wait_cloudflare(page, max_wait_seconds=30)
     except Exception as exc:
-        logger.warning("[phone-reg] phase1.5 goto /add-email 失败(放弃): %s", exc)
+        logger.warning("[phone-reg] phase1.5 goto OAuth URL 失败(放弃): %s", exc)
         return False, current_email, current_address_id
 
     safe_screenshot(page, SCREENSHOT_DIR / "phone_15a_add_email_landing.png")
@@ -2287,13 +2300,25 @@ def _phase15_bind_email(
             )
             safe_screenshot(page, SCREENSHOT_DIR / f"phone_15_bind_r{round_idx:02d}.png")
 
-        # 成功:落回 chatgpt.com 主页 或 settings 页 — 绑邮箱完成
-        if (("chatgpt.com" in url_low and "auth.openai.com" not in url_low
-                and "/auth/" not in url_low)
+        # 成功:
+        # - localhost:1455/auth/callback?code=... → OAuth 完成(意味前置 /add-email
+        #   一定走完了,邮件验证 OK)
+        # - 落回 chatgpt.com 主页 / settings 页
+        # - URL 含 "success"
+        # - 已 submit OTP 且 URL 不再在 add-email/email-verification
+        is_oauth_callback = (
+            "localhost:1455" in url_low or "localhost%3A1455" in url_low
+            or "/auth/callback" in url_low
+        )
+        if (is_oauth_callback
+                or ("chatgpt.com" in url_low and "auth.openai.com" not in url_low
+                    and "/auth/" not in url_low)
                 or "success" in url_low
                 or (otp_submitted and "add-email" not in url_low and "email-verification" not in url_low)):
-            logger.info("[phone-reg] ✅ phase1.5 绑邮箱完成 email=%s url=%s",
-                        current_email, url[:100])
+            logger.info(
+                "[phone-reg] ✅ phase1.5 绑邮箱完成 email=%s url=%s (oauth_callback=%s)",
+                current_email, url[:100], is_oauth_callback,
+            )
             safe_screenshot(page, SCREENSHOT_DIR / "phone_15z_bind_done.png")
             return True, current_email, current_address_id
 
@@ -2530,6 +2555,15 @@ def _phase15_bind_email(
             wait_cloudflare(page, max_wait_seconds=30)
             _sleep(2)
             otp_submitted = True
+            last_url = url
+            continue
+
+        # 6) consent 页面(OAuth 完整流程会经过)→ 点 Allow/Continue
+        # 邮件验证完后 OAuth 通常直接跳 callback,但有些账号会先过 consent
+        if "/consent" in url_low or "/authorize" in url_low:
+            logger.info("[phone-reg] phase1.5 r%d consent 页 — 点 Allow", round_idx)
+            _click_button_by_text(page, ALLOW_BUTTON_TEXTS, timeout_ms=8000)
+            _sleep(4)
             last_url = url
             continue
 
