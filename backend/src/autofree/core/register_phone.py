@@ -2371,12 +2371,62 @@ def _phase15_bind_email(
                 return False, current_email, current_address_id
             # /add-email 反爬严:用 Playwright 真点击(isTrusted=true),否则后端
             # silent drop 不发邮件(详见 _click_submit_button_real 注释)
-            _click_submit_button_real(page)
-            _sleep(4)
-            wait_cloudflare(page, max_wait_seconds=30)
-            _sleep(2)
+            #
+            # ★ 诊断:抓 submit 后的网络请求 — 定位 OpenAI 后端实际收到了什么 +
+            # 返了什么状态码。inbox 一直 0 封,需要看 API 层证据
+            captured_responses: list[dict] = []
+
+            def _on_response(resp):
+                try:
+                    rurl = resp.url
+                    if "openai.com" not in rurl and "chatgpt.com" not in rurl:
+                        return
+                    method = ""
+                    try:
+                        method = resp.request.method
+                    except Exception:
+                        pass
+                    info = {
+                        "method": method,
+                        "url": rurl[:180],
+                        "status": resp.status,
+                    }
+                    # 关注的请求(可能涉及 email send):尝试抓 body
+                    rurl_low = rurl.lower()
+                    is_relevant = (
+                        resp.status >= 400
+                        or "email" in rurl_low
+                        or "add" in rurl_low
+                        or "verification" in rurl_low
+                        or "verify" in rurl_low
+                        or "/backend-api" in rurl_low
+                        or "/api/auth" in rurl_low
+                        or "/api/accounts" in rurl_low
+                    )
+                    if is_relevant:
+                        try:
+                            body = resp.text() or ""
+                            info["body"] = body[:400]
+                        except Exception:
+                            info["body"] = "<body read failed>"
+                    captured_responses.append(info)
+                except Exception:
+                    pass
+
+            page.on("response", _on_response)
+            try:
+                _click_submit_button_real(page)
+                _sleep(4)
+                wait_cloudflare(page, max_wait_seconds=30)
+                _sleep(2)
+            finally:
+                try:
+                    page.remove_listener("response", _on_response)
+                except Exception:
+                    pass
+
             email_submitted = True
-            # 诊断:dump submit 后的页面状态 — 用于判断 OpenAI 是否藏了错误
+            # 诊断:dump submit 后的页面状态
             try:
                 post_url = (page.url or "")[:160]
                 post_body = page.evaluate(
@@ -2392,6 +2442,30 @@ def _phase15_bind_email(
                 )
             except Exception:
                 pass
+
+            # 诊断:dump 网络请求 — 看 OpenAI 实际收到了什么 + 返了什么
+            try:
+                logger.warning(
+                    "[phone-reg] [DIAG] phase1.5 submit 后捕获到 %d 个 OpenAI/chatgpt 响应:",
+                    len(captured_responses),
+                )
+                for idx, r in enumerate(captured_responses[:25]):
+                    body_preview = r.get("body") or ""
+                    if body_preview:
+                        logger.warning(
+                            "  [%d] %s %d %s | body[:400]=%r",
+                            idx, r.get("method") or "?", r.get("status") or 0,
+                            r.get("url") or "", body_preview,
+                        )
+                    else:
+                        logger.warning(
+                            "  [%d] %s %d %s",
+                            idx, r.get("method") or "?", r.get("status") or 0,
+                            r.get("url") or "",
+                        )
+            except Exception:
+                pass
+
             safe_screenshot(page, SCREENSHOT_DIR / "phone_15c_add_email_after_submit.png")
             last_url = url
             continue
