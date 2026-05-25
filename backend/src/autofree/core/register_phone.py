@@ -2165,22 +2165,20 @@ def _phase15_bind_email(
 ) -> tuple[bool, str, int | None]:
     """phase 1 完成后立即绑邮箱。返回 (ok, bound_email, bound_address_id)。
 
-    - ok=True:邮箱绑成功(bound_email 是真正绑的邮箱,可能跟传入不同 — 换过)
-    - ok=False:放弃(不抛),bound_email/id 是最后尝试过的那个
+    - ok=True:邮箱绑成功(bound_email 等于传入,签名保留是为兼容老调用方)
+    - ok=False:放弃(不抛),让 phase 2 fallback;号最终走 pending,可手动补绑
 
     设计:不抛 OAuthFailed — 即便绑邮箱失败,phase 2 也可以尝试(顶多再失败一次,
     号当 phone-only pending 入库,用户可以走「补绑邮箱」按钮重试)。这步是
     best-effort,不阻塞主流程。
 
-    OTP 等待 60s,超时后用 mail_client.create_email 创建新邮箱重试。新邮箱用
-    同 domain。最多换 MAX_EMAIL_RETRIES 次邮箱。
+    单次尝试,60s 超时直接放弃 — 之前的「换邮箱重试」证实没用(OpenAI 是页面
+    层面不发,跟邮箱无关),所以不再浪费 cloud-mail 配额。
     """
-    OTP_TIMEOUT_S = 60          # 60s 收不到就换邮箱
-    MAX_EMAIL_RETRIES = 3       # 最多换 3 次邮箱(初始 + 3 次 retry = 4 个邮箱)
+    OTP_TIMEOUT_S = 60          # 60s 收不到就放弃,phase 2 兜底
 
     current_email = email_for_bind
     current_address_id = address_id_for_bind
-    domain = current_email.split("@", 1)[1] if "@" in current_email else ""
     logger.info("[phone-reg] === Phase 1.5 绑邮箱 === email=%s", current_email)
     safe_screenshot(page, SCREENSHOT_DIR / "phone_15_pre_bind_email.png")
 
@@ -2203,10 +2201,8 @@ def _phase15_bind_email(
 
     email_submitted = False
     otp_submitted = False
-    email_retry_count = 0
     last_url = ""
-    # 15 轮基础 + 每次换邮箱多给 8 轮(回 /add-email + 填 + OTP)
-    max_rounds = 15 + MAX_EMAIL_RETRIES * 8
+    max_rounds = 15
     for round_idx in range(max_rounds):
         if is_stop_requested():
             logger.info("[phone-reg] phase1.5 收到 stop,放弃绑邮箱")
@@ -2322,10 +2318,27 @@ def _phase15_bind_email(
             wait_cloudflare(page, max_wait_seconds=30)
             _sleep(2)
             email_submitted = True
+            # 诊断:dump submit 后的页面状态 — 用于判断 OpenAI 是否藏了错误
+            try:
+                post_url = (page.url or "")[:160]
+                post_body = page.evaluate(
+                    "() => (document.body && document.body.innerText || '').slice(0, 600)"
+                )
+                post_errors = page.evaluate(
+                    """() => Array.from(document.querySelectorAll('[role=alert], [aria-live], .error, .alert, [class*=error i], [class*=Error]'))
+                        .map(el => (el.innerText || '').trim()).filter(t => t).slice(0, 5)"""
+                )
+                logger.info(
+                    "[phone-reg] [DIAG] phase1.5 submit 后 url=%s errors=%r body[:600]=%r",
+                    post_url, post_errors, (post_body or "")[:600],
+                )
+            except Exception:
+                pass
+            safe_screenshot(page, SCREENSHOT_DIR / "phone_15c_add_email_after_submit.png")
             last_url = url
             continue
 
-        # 5) /email-verification / OTP 页 — 等 cloud-mail OTP (60s 超时 → 换邮箱)
+        # 5) /email-verification / OTP 页 — 等 cloud-mail OTP (60s 超时直接放弃)
         is_email_otp = (
             "email-verification" in url_low
             or "email-otp" in url_low
@@ -2344,57 +2357,10 @@ def _phase15_bind_email(
                     current_email, after_id=mail_baseline_id, timeout=OTP_TIMEOUT_S,
                 )
             except Exception as exc:
-                logger.warning("[phone-reg] phase1.5 r%d OTP %ds 超时: %s",
-                               round_idx, OTP_TIMEOUT_S, exc)
-                safe_screenshot(
-                    page,
-                    SCREENSHOT_DIR / f"phone_15_otp_timeout_retry{email_retry_count}.png",
-                )
-                # ─── 换邮箱重试 ───
-                if email_retry_count >= MAX_EMAIL_RETRIES:
-                    logger.warning(
-                        "[phone-reg] phase1.5 已换 %d 次邮箱仍收不到 OTP — 放弃 phase 1.5",
-                        email_retry_count,
-                    )
-                    return False, current_email, current_address_id
-                if not domain:
-                    logger.warning("[phone-reg] phase1.5 无 domain 信息,无法换邮箱 — 放弃")
-                    return False, current_email, current_address_id
-                try:
-                    new_addr_id, new_email = mail_client.create_email(domain=domain)
-                except Exception as create_exc:
-                    logger.warning("[phone-reg] phase1.5 create_email 失败: %s", create_exc)
-                    return False, current_email, current_address_id
-                email_retry_count += 1
-                logger.warning(
-                    "[phone-reg] phase1.5 换邮箱 (%d/%d) %s -> %s",
-                    email_retry_count, MAX_EMAIL_RETRIES, current_email, new_email,
-                )
-                # 删老邮箱(已知 OpenAI 不发 OTP,没价值,省 cloud-mail 配额)
-                if current_address_id:
-                    try:
-                        mail_client.delete_email(current_address_id)
-                    except Exception:
-                        pass
-                current_email = new_email
-                current_address_id = new_addr_id
-                try:
-                    mail_baseline_id = mail_client.latest_mail_id(current_email)
-                except Exception:
-                    mail_baseline_id = None
-                # 回到 /add-email 重填(同一 context 已登录,直达)
-                try:
-                    page.goto("https://auth.openai.com/add-email",
-                              wait_until="load", timeout=30000)
-                    _sleep(2)
-                    wait_cloudflare(page, max_wait_seconds=30)
-                except Exception as goto_exc:
-                    logger.warning("[phone-reg] phase1.5 换邮箱后 goto /add-email 失败: %s", goto_exc)
-                    return False, current_email, current_address_id
-                email_submitted = False
-                otp_submitted = False
-                last_url = ""
-                continue
+                logger.warning("[phone-reg] phase1.5 OTP %ds 超时: %s — 放弃 phase 1.5",
+                               OTP_TIMEOUT_S, exc)
+                safe_screenshot(page, SCREENSHOT_DIR / "phone_15_otp_timeout.png")
+                return False, current_email, current_address_id
             # OTP 拿到,填写
             if not _fill_sms_code_smart(page, mail_code):
                 logger.warning("[phone-reg] phase1.5 OTP 填写失败")
@@ -2905,7 +2871,7 @@ def register_phone_and_fetch_bundle(
 
     参数:
       email       — 用于 OAuth /add-email 绑定的 cloud-mail 邮箱(预先 create_email 出来)
-      address_id  — 上述 email 的 cloud-mail id(用于 phase 1.5 换邮箱时删老邮箱省配额)
+      address_id  — 上述 email 的 cloud-mail id(签名保留,phase 1.5 不再换邮箱)
       password    — 设给账号的密码(可能 phase2 不用,但 phase1 必填)
       mail_client — cloud-mail 客户端(收 add-email 后的 OTP)
 
@@ -3020,7 +2986,7 @@ def register_phone_and_fetch_bundle(
             # Phase 1.5: 注册后立即绑邮箱(用 phase 1 同一 context 带 cookies)
             # 不绑邮箱的号在 phase 2 OAuth 时会拿到无效 code → token 交换返
             # token_exchange_user_error。所以这步是 phase 2 成功的前置条件。
-            # 内部支持 60s OTP 超时后换邮箱重试(最多 3 次)。
+            # 单次尝试,60s OTP 超时直接放弃(phase 2 兜底,最终走 pending)。
             phase15_ok, bound_email, bound_address_id = _phase15_bind_email(
                 page,
                 email_for_bind=email,
