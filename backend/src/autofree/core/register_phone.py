@@ -285,6 +285,37 @@ def _click_submit_button(page: Page) -> bool:
     return False
 
 
+def _click_submit_button_real(page: Page, timeout_ms: int = 8000) -> bool:
+    """Playwright 真点击 — 产生 event.isTrusted=true 的原生鼠标事件。
+
+    /add-email 这种反爬严的页面只接受 isTrusted=true 的提交,dispatchEvent 合成事件
+    会被 OpenAI 后端 silent drop(UI 跳到 'Check your inbox' 但邮件永远不发)。
+    跟 register.py 的 click_primary_button 行为一致。
+    失败回退到 _click_submit_button(dispatchEvent),保持兼容老路径。
+    """
+    candidates = list(SUBMIT_BUTTON_TEXTS) + list(FINISH_BUTTON_TEXTS)
+    for text in candidates:
+        try:
+            btn = page.locator(f'button[type="submit"]:has-text("{text}")').first
+            if btn.is_visible(timeout=1500) and not btn.is_disabled(timeout=500):
+                btn.click(timeout=timeout_ms)
+                logger.info("[phone-reg] submit 真点击: %r", text)
+                return True
+        except Exception:
+            continue
+    for text in candidates:
+        try:
+            btn = page.locator(f'button:has-text("{text}")').first
+            if btn.is_visible(timeout=1500) and not btn.is_disabled(timeout=500):
+                btn.click(timeout=timeout_ms)
+                logger.info("[phone-reg] submit 真点击(非 submit type): %r", text)
+                return True
+        except Exception:
+            continue
+    logger.warning("[phone-reg] 真点击没找到按钮 — 回退 dispatchEvent")
+    return _click_submit_button(page)
+
+
 def _dismiss_cookie_banner(page: Page) -> None:
     """优先点「拒绝非必需」,失败回退「全部接受」— 不阻塞主流程。"""
     if _click_button_by_text(page, ACCEPT_COOKIES_TEXTS, timeout_ms=1500):
@@ -2338,7 +2369,9 @@ def _phase15_bind_email(
                 logger.warning("[phone-reg] phase1.5 /add-email 填写失败: %s", exc)
                 safe_screenshot(page, SCREENSHOT_DIR / "phone_15_add_email_fill_fail.png")
                 return False, current_email, current_address_id
-            _click_submit_button(page)
+            # /add-email 反爬严:用 Playwright 真点击(isTrusted=true),否则后端
+            # silent drop 不发邮件(详见 _click_submit_button_real 注释)
+            _click_submit_button_real(page)
             _sleep(4)
             wait_cloudflare(page, max_wait_seconds=30)
             _sleep(2)
@@ -2704,7 +2737,8 @@ def _phase2_oauth(
                 safe_screenshot(page, SCREENSHOT_DIR / "phone_25_add_email_no_input.png")
                 raise OAuthFailed(f"/add-email 填写失败: {exc}") from exc
             _sleep(0.5)
-            _click_submit_button(page)
+            # /add-email 反爬严:用真点击(isTrusted=true)— 跟 phase 1.5 同因
+            _click_submit_button_real(page)
             _sleep(4)
             wait_cloudflare(page, max_wait_seconds=30)
             _sleep(2)
