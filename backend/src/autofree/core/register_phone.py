@@ -1699,9 +1699,10 @@ def _phase1_signup(
         except sms_mod.SmsAborted:
             _safe_refund(sms_provider, order, "cancel")
             raise BatchStopped("phone reg phase1 等 SMS 时收到 stop")
-        except sms_mod.SmsTimeout as exc:
-            logger.warning("[phone-reg] SMS#1 超时 attempt=%d %ds 死号 ban",
-                           attempt, SMS_WAIT_SECONDS)
+        except (sms_mod.SmsTimeout, sms_mod.SmsError) as exc:
+            # SmsError 通常是 STATUS_CANCEL(hero-sms 服务端超时自动 cancel) — 跟 timeout 同样处理
+            logger.warning("[phone-reg] SMS#1 失败 attempt=%d (%s) — 死号 ban 重试",
+                           attempt, type(exc).__name__)
             _safe_refund(sms_provider, order, "ban")
             last_err = exc
             # 重新填手机号:刷新页面?直接返回 phone 输入框?
@@ -1855,6 +1856,28 @@ def _phase1_signup(
             )
 
         if is_pw_page:
+            # ★ 决策时的 body 可能是 stale(transitional state / 空字符串)→ is_sms_body=False
+            # 误判为密码页。立刻再 query 一次实时状态:若已是 SMS 页 或 没 password input,
+            # 跳过这一轮(不浪费 15s 在 _fill_password_input,也不把密码 type 进 Code input)
+            try:
+                live_check = page.evaluate(
+                    """() => ({
+                        has_pw: !!document.querySelector('input[type="password"]'),
+                        is_sms: ['check your phone','enter the verification','verification code','请输入验证码','输入验证码']
+                            .some(k => (document.body && document.body.innerText || '').toLowerCase().includes(k.toLowerCase())),
+                    })"""
+                )
+            except Exception:
+                live_check = {"has_pw": True, "is_sms": False}
+            if live_check.get("is_sms") or not live_check.get("has_pw"):
+                logger.info(
+                    "[phone-reg] phase1 r%d 入 is_pw_page 块但 live 重检发现已不是密码页 "
+                    "(has_pw=%s is_sms=%s) — skip 让下一轮重判",
+                    round_idx, live_check.get("has_pw"), live_check.get("is_sms"),
+                )
+                last_url = url
+                continue
+
             diag_counts["pw_hit"] += 1
             # 同一 URL 上连续填密码 > 3 次 = 卡死(Continue 没起作用),立刻 abort
             # 不能让主循环傻等 20 轮 × 65s ≈ 22min
@@ -1966,7 +1989,8 @@ def _phase1_signup(
                 )
             except sms_mod.SmsAborted:
                 raise BatchStopped("phone reg phase1 SMS 等待时收到 stop")
-            except sms_mod.SmsTimeout:
+            except (sms_mod.SmsTimeout, sms_mod.SmsError):
+                # SmsError(STATUS_CANCEL)和 timeout 一样进 Resend 流程
                 # 没收到 → 点 Resend(每号只点一次)
                 if order.id not in resend_clicked_for:
                     try:
@@ -2008,8 +2032,9 @@ def _phase1_signup(
                     )
                 except sms_mod.SmsAborted:
                     raise BatchStopped("phone reg phase1 SMS 等待时收到 stop")
-                except sms_mod.SmsTimeout as exc:
-                    # 真的没来 — 落入原 ban 换号流程
+                except (sms_mod.SmsTimeout, sms_mod.SmsError) as exc:
+                    # SmsError(hero-sms STATUS_CANCEL,长时间没码服务端自动取消)
+                    # 跟真 timeout 一样进 ban 换号流程,而不是抛 SmsError 当未预期异常
                     code = None
                     sms_timeout_exc = exc
             if code is None:
