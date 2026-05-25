@@ -2382,8 +2382,15 @@ def _phase15_bind_email(
                     if "openai.com" not in rurl and "chatgpt.com" not in rurl:
                         return
                     method = ""
+                    req_headers: dict = {}
+                    req_body = ""
                     try:
                         method = resp.request.method
+                        req_headers = resp.request.headers or {}
+                    except Exception:
+                        pass
+                    try:
+                        req_body = resp.request.post_data or ""
                     except Exception:
                         pass
                     info = {
@@ -2391,12 +2398,12 @@ def _phase15_bind_email(
                         "url": rurl[:180],
                         "status": resp.status,
                     }
-                    # 关注的请求(可能涉及 email send):尝试抓 body
+                    # 关注的请求(可能涉及 email send):抓 request headers + body + response body
                     rurl_low = rurl.lower()
                     is_relevant = (
                         resp.status >= 400
+                        or "add-email" in rurl_low
                         or "email" in rurl_low
-                        or "add" in rurl_low
                         or "verification" in rurl_low
                         or "verify" in rurl_low
                         or "/backend-api" in rurl_low
@@ -2404,6 +2411,18 @@ def _phase15_bind_email(
                         or "/api/accounts" in rurl_low
                     )
                     if is_relevant:
+                        # 关键 header 筛选 — 排除 cookie / authorization 等冗长字段,留指纹相关
+                        interesting_keys = (
+                            "user-agent", "accept", "accept-language", "origin", "referer",
+                            "sec-ch-ua", "sec-ch-ua-platform", "sec-ch-ua-mobile",
+                            "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest",
+                            "content-type", "x-csrf-token", "x-requested-with",
+                            "x-oai-client-locale", "x-oai-mobile-os", "oai-client-version",
+                        )
+                        info["req_headers"] = {
+                            k: req_headers[k] for k in req_headers if k.lower() in interesting_keys
+                        }
+                        info["req_body"] = (req_body or "")[:300]
                         try:
                             body = resp.text() or ""
                             info["body"] = body[:400]
@@ -2451,12 +2470,20 @@ def _phase15_bind_email(
                 )
                 for idx, r in enumerate(captured_responses[:25]):
                     body_preview = r.get("body") or ""
-                    if body_preview:
+                    req_h = r.get("req_headers") or {}
+                    req_b = r.get("req_body") or ""
+                    if body_preview or req_h or req_b:
                         logger.warning(
-                            "  [%d] %s %d %s | body[:400]=%r",
+                            "  [%d] %s %d %s",
                             idx, r.get("method") or "?", r.get("status") or 0,
-                            r.get("url") or "", body_preview,
+                            r.get("url") or "",
                         )
+                        if req_h:
+                            logger.warning("      req_headers=%r", req_h)
+                        if req_b:
+                            logger.warning("      req_body=%r", req_b)
+                        if body_preview:
+                            logger.warning("      resp_body[:400]=%r", body_preview)
                     else:
                         logger.warning(
                             "  [%d] %s %d %s",
