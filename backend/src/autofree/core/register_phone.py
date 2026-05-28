@@ -2299,12 +2299,14 @@ def _phase15_bind_email(
             )
             safe_screenshot(page, SCREENSHOT_DIR / f"phone_15_bind_r{round_idx:02d}.png")
 
-        # 成功:
-        # - localhost:1455/auth/callback?code=... → OAuth 完成(意味前置 /add-email
-        #   一定走完了,邮件验证 OK)
-        # - 落回 chatgpt.com 主页 / settings 页
-        # - URL 含 "success"
-        # - 已 submit OTP 且 URL 不再在 add-email/email-verification
+        # 成功:必须走到 OAuth callback URL — 这才能让顶层抓到 auth_code 换 token
+        # - localhost:1455/auth/callback?code=... → OAuth 完成
+        # - 落回 chatgpt.com(罕见,codex OAuth 走 localhost 不走 chatgpt)
+        #
+        # 之前的"otp_submitted 且不在 add-email/email-verification"分支去掉了 —
+        # OTP 提交后会跳 consent 页(auth.openai.com/oauth/authorize?...),那个 URL
+        # 不在 add-email 也不在 email-verification → 误判提前 return,导致 consent
+        # 没点 → callback 没触发 → 顶层 auth_code 空 → 白走一遍。
         is_oauth_callback = (
             "localhost:1455" in url_low or "localhost%3A1455" in url_low
             or "/auth/callback" in url_low
@@ -2312,10 +2314,9 @@ def _phase15_bind_email(
         if (is_oauth_callback
                 or ("chatgpt.com" in url_low and "auth.openai.com" not in url_low
                     and "/auth/" not in url_low)
-                or "success" in url_low
-                or (otp_submitted and "add-email" not in url_low and "email-verification" not in url_low)):
+                or "success" in url_low):
             logger.info(
-                "[phone-reg] ✅ phase1.5 绑邮箱完成 email=%s url=%s (oauth_callback=%s)",
+                "[phone-reg] ✅ phase1.5 OAuth 完成 email=%s url=%s (callback=%s)",
                 current_email, url[:100], is_oauth_callback,
             )
             safe_screenshot(page, SCREENSHOT_DIR / "phone_15z_bind_done.png")
@@ -2623,11 +2624,57 @@ def _phase15_bind_email(
             except Exception as exc:
                 logger.warning("[phone-reg] phase1.5 picker 处理异常: %s", exc)
 
-        # 7) consent 页面(OAuth 完整流程会经过)→ 点 Allow/Continue
-        # 邮件验证完后 OAuth 通常直接跳 callback,但有些账号会先过 consent
-        if "/consent" in url_low or "/authorize" in url_low:
-            logger.info("[phone-reg] phase1.5 r%d consent 页 — 点 Allow", round_idx)
-            _click_button_by_text(page, ALLOW_BUTTON_TEXTS, timeout_ms=8000)
+        # 7) consent 页面 — 用 body 文本判定(/oauth/authorize? 初始 URL 也含 /authorize,
+        # 但内容不是 consent,改用 "Sign in to" / "By continuing" 等 consent 特征文本)
+        is_consent = (
+            "/consent" in url_low
+            or "Sign in to" in (body_text or "")
+            or "By continuing, ChatGPT" in (body_text or "")
+        )
+        if is_consent:
+            logger.info("[phone-reg] phase1.5 r%d consent — 真点击 Continue", round_idx)
+            # 跟 picker 一样:JS 找按钮打 marker,Playwright 真点击(isTrusted)
+            try:
+                marked = page.evaluate(
+                    """(texts) => {
+                        document.querySelectorAll('[data-autofree-consent]').forEach(
+                            el => el.removeAttribute('data-autofree-consent')
+                        );
+                        const nodes = document.querySelectorAll('button, [role="button"], a');
+                        for (const b of nodes) {
+                            if (b.disabled || b.getAttribute('aria-disabled') === 'true') continue;
+                            const t = (b.innerText || b.textContent || '').trim();
+                            if (!t) continue;
+                            const rect = b.getBoundingClientRect();
+                            if (rect.width <= 0 || rect.height <= 0) continue;
+                            // 排除 Cancel
+                            const tlow = t.toLowerCase();
+                            if (tlow.includes('cancel') || tlow === '取消') continue;
+                            if (texts.some(tx => t.includes(tx))) {
+                                b.setAttribute('data-autofree-consent', '1');
+                                return t;
+                            }
+                        }
+                        return null;
+                    }""",
+                    list(ALLOW_BUTTON_TEXTS),
+                )
+                if marked:
+                    try:
+                        page.locator('[data-autofree-consent="1"]').first.click(timeout=8000)
+                        logger.info("[phone-reg] phase1.5 consent 真点击: %r", marked)
+                    except Exception as click_exc:
+                        logger.warning(
+                            "[phone-reg] phase1.5 consent 真点击失败(%s),兜底 dispatchEvent",
+                            click_exc,
+                        )
+                        _click_button_by_text(page, ALLOW_BUTTON_TEXTS, timeout_ms=8000)
+                else:
+                    logger.warning("[phone-reg] phase1.5 consent 没找到 Allow/Continue 按钮")
+                    _click_button_by_text(page, ALLOW_BUTTON_TEXTS, timeout_ms=8000)
+            except Exception as exc:
+                logger.warning("[phone-reg] phase1.5 consent 处理异常: %s", exc)
+                _click_button_by_text(page, ALLOW_BUTTON_TEXTS, timeout_ms=8000)
             _sleep(4)
             last_url = url
             continue
