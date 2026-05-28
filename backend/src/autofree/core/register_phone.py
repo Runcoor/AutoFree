@@ -2310,6 +2310,9 @@ def _phase15_bind_email(
         is_oauth_callback = (
             "localhost:1455" in url_low or "localhost%3A1455" in url_low
             or "/auth/callback" in url_low
+            # Chrome 试图连 localhost:1455 失败 → page.url 返 chrome-error,但
+            # 之前的 request URL 已经被 capture handler 抓到了 callback code
+            or "chrome-error" in url_low
         )
         if (is_oauth_callback
                 or ("chatgpt.com" in url_low and "auth.openai.com" not in url_low
@@ -3321,13 +3324,19 @@ def register_phone_and_fetch_bundle(
                 if bound_email and bound_email != email:
                     email = bound_email
 
-            # ─── phase 1.5 已捕获 callback code → 直接换 token,砍掉 phase 2 ───
-            # phase 1.5 走完整 OAuth(consent + 跳 localhost:1455 callback),
-            # _attach_capture_handlers 早已挂在 page 上,callback URL 出现的瞬间
-            # auth_code[0] 就被填了。这是「金子」code — 跟手动粘贴 CPA 等价。
-            if phase15_ok and auth_code[0]:
+            # ─── 抓到 auth_code 就直接换 token,砍掉 phase 2 ───
+            # phase 1.5 走 OAuth 的过程中,_attach_capture_handlers 挂在 page 的
+            # request/requestfailed/response/framenav 事件上 — callback URL
+            # 一旦在浏览器里出现(即便 localhost:1455 连不上、跳到 chrome-error),
+            # 请求 URL 仍然被捕获,auth_code[0] 已经填好。这是「金子」code —
+            # 跟手动粘贴 CPA 等价。
+            #
+            # 关键:不依赖 phase15_ok — phase 1.5 内部 URL 检测可能因 page.url 返
+            # chrome-error 而 timeout 返 False,但 auth_code 实际已经到手。
+            if auth_code[0]:
                 logger.info(
-                    "[phone-reg] ✅ phase 1.5 拿到 auth_code,跳过 phase 2 直接换 token"
+                    "[phone-reg] ✅ 抓到 auth_code (phase15_ok=%s),跳过 phase 2 直接换 token",
+                    phase15_ok,
                 )
                 # 给 OpenAI 后端时间 finalize auth_code(跟手动粘贴 CPA 的人肉延迟等价)
                 time.sleep(2)
@@ -3351,8 +3360,8 @@ def register_phone_and_fetch_bundle(
                     )
                 return bundle
 
-            # phase 1.5 没拿到 code → 走 phase 2 兜底
-            logger.info("[phone-reg] phase 1.5 没拿到 callback code,fallback phase 2 兜底")
+            # auth_code 没拿到 → 走 phase 2 兜底
+            logger.info("[phone-reg] auth_code 没拿到,fallback phase 2 兜底")
 
             # ─── Phase 1 → Phase 2 切换:重建 browser context ───
             # Phase1 注册 chatgpt.com 留下了 cookies / localStorage / IndexedDB / Service
