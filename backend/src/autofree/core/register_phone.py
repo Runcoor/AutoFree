@@ -2218,6 +2218,7 @@ def _phase15_bind_email(
     password: str,
     phone_e164: str,
     country: PhoneCountry,
+    auth_url: str,
 ) -> tuple[bool, str, int | None]:
     """phase 1 完成后立即绑邮箱。返回 (ok, bound_email, bound_address_id)。
 
@@ -2252,12 +2253,10 @@ def _phase15_bind_email(
         mail_baseline_id = None
 
     # ★ 不直 goto /add-email — 必须走 OAuth URL 触发 password_verify
-    # PKCE/state 是 phase 1.5 内部用的,跟 phase 2 的独立 — phase 2 后续清 cookies
-    # 重启一份新 OAuth 流程,所以这里的 code 不会被复用。
-    code_verifier, code_challenge = _pkce()
-    state = secrets.token_urlsafe(16)
-    auth_url = _build_auth_url(code_challenge, state)
-    logger.info("[phone-reg] phase1.5 入口 OAuth URL state=%s", state[:8])
+    # 用传入的 auth_url(top-level 已生成 PKCE + state)— phase 1.5 走完 OAuth 拿到
+    # 的 callback code 跟 top-level 的 verifier 是一对,直接换 token 就能成功,
+    # 不需要 phase 2 再跑一遍。
+    logger.info("[phone-reg] phase1.5 入口 OAuth URL(共用 top-level PKCE)")
     try:
         page.goto(auth_url, wait_until="load", timeout=30000)
         _sleep(2)
@@ -3177,10 +3176,11 @@ def register_phone_and_fetch_bundle(
                 page, sms_provider, sms_cfg, country, password, full_name, birth,
             )
 
-            # Phase 1.5: 注册后立即绑邮箱(用 phase 1 同一 context 带 cookies)
-            # 不绑邮箱的号在 phase 2 OAuth 时会拿到无效 code → token 交换返
-            # token_exchange_user_error。所以这步是 phase 2 成功的前置条件。
-            # 单次尝试,60s OTP 超时直接放弃(phase 2 兜底,最终走 pending)。
+            # Phase 1.5: 走完整 OAuth(同 phase 2 的 auth_url) — 绑邮箱 + 拿 callback code
+            #
+            # 跟 phase 2 共用顶层的 code_verifier — 这样 phase 1.5 拿到的 callback code
+            # 用顶层 verifier 直接换 token 就能成功,**不需要再跑 phase 2**(跑了反而
+            # 因为 state 还在 OpenAI 后端同步中会触发 token_exchange_user_error)。
             phase15_ok, bound_email, bound_address_id = _phase15_bind_email(
                 page,
                 email_for_bind=email,
@@ -3189,26 +3189,57 @@ def register_phone_and_fetch_bundle(
                 password=password,
                 phone_e164=phone_e164,
                 country=country,
+                auth_url=auth_url,
             )
             if phase15_ok:
                 if bound_email != email:
                     logger.info(
-                        "[phone-reg] ✅ Phase 1.5 邮箱已绑定(换过邮箱 %s -> %s),"
-                        "phase 2 可以拿完整 token",
+                        "[phone-reg] ✅ Phase 1.5 邮箱已绑定(换过邮箱 %s -> %s)",
                         email, bound_email,
                     )
-                    # 后续 phase 2 (/add-email 兜底)/ token fallback 都用新邮箱
                     email = bound_email
                 else:
-                    logger.info("[phone-reg] ✅ Phase 1.5 邮箱已绑定,phase 2 可以拿完整 token")
+                    logger.info("[phone-reg] ✅ Phase 1.5 邮箱已绑定")
             else:
                 logger.warning(
-                    "[phone-reg] ⚠️ Phase 1.5 绑邮箱失败 — phase 2 OAuth 大概率会"
-                    "拿到无效 code 或 token_exchange_user_error。继续试,失败就当 phone-only。"
+                    "[phone-reg] ⚠️ Phase 1.5 失败 — fallback phase 2 兜底"
                 )
-                # 即便失败,phase 1.5 内部可能换过邮箱并删了老的 — 用最后那个继续
+                # phase 1.5 内部可能换过邮箱 — 用最后那个继续
                 if bound_email and bound_email != email:
                     email = bound_email
+
+            # ─── phase 1.5 已捕获 callback code → 直接换 token,砍掉 phase 2 ───
+            # phase 1.5 走完整 OAuth(consent + 跳 localhost:1455 callback),
+            # _attach_capture_handlers 早已挂在 page 上,callback URL 出现的瞬间
+            # auth_code[0] 就被填了。这是「金子」code — 跟手动粘贴 CPA 等价。
+            if phase15_ok and auth_code[0]:
+                logger.info(
+                    "[phone-reg] ✅ phase 1.5 拿到 auth_code,跳过 phase 2 直接换 token"
+                )
+                # 给 OpenAI 后端时间 finalize auth_code(跟手动粘贴 CPA 的人肉延迟等价)
+                time.sleep(2)
+                bundle = _exchange_code(auth_code[0], code_verifier, fallback_email=email)
+                bundle["phone_verified"] = True
+                bundle["phone"] = phone_e164
+                bundle["email_bound"] = True
+                bundle["via_cpa"] = False
+                bundle["bound_address_id"] = bound_address_id
+                # 提交订单
+                try:
+                    sms_provider.finish_order(order.id)
+                    finished_committed = True
+                    logger.info(
+                        "[phone-reg] ✅ 全流程成功(phase 1.5 path),sms order=%d finish_order 提交",
+                        order.id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[phone-reg] finish_order 失败(token 已拿到,不影响主流程): %s", exc,
+                    )
+                return bundle
+
+            # phase 1.5 没拿到 code → 走 phase 2 兜底
+            logger.info("[phone-reg] phase 1.5 没拿到 callback code,fallback phase 2 兜底")
 
             # ─── Phase 1 → Phase 2 切换:重建 browser context ───
             # Phase1 注册 chatgpt.com 留下了 cookies / localStorage / IndexedDB / Service
