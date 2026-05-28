@@ -3246,6 +3246,11 @@ def register_phone_and_fetch_bundle(
     order = None
     phone_e164 = ""
     finished_committed = False
+    # phase 1.5 成功后,改走 resume 路径(fetch_personal_bundle)的标记 — 必须在
+    # 顶层 sync_playwright() with 块退出后才能调,否则嵌套 sync_playwright 报错。
+    do_resume_path = False
+    resume_phone_e164 = ""
+    resume_bound_address_id: int | None = None
 
     with email_screenshot_scope(email) as ss_dir, sync_playwright() as p:
         logger.info("[phone-reg] 截图目录: %s", ss_dir)
@@ -3342,9 +3347,9 @@ def register_phone_and_fetch_bundle(
             #      换 token → ✅)
             if phase15_ok:
                 logger.info(
-                    "[phone-reg] ✅ Phase 1.5 绑邮箱完成 — 关 phase 1 browser 切 resume 路径"
+                    "[phone-reg] ✅ Phase 1.5 绑邮箱完成 — 关 phase 1 browser,稍后跑 resume 路径"
                 )
-                # 关 phase 1 browser(连 context 一起释放)
+                # 关 phase 1 browser(连 context 一起释放)— in-flux session 释放掉
                 try:
                     context.close()
                 except Exception as exc:
@@ -3354,7 +3359,7 @@ def register_phone_and_fetch_bundle(
                 except Exception as exc:
                     logger.debug("[phone-reg] 关 phase1 browser: %s", exc)
 
-                # finish_order(SMS#1 已用,确认扣费 — phase 1 注册成功就该扣)
+                # finish_order(SMS 已用,锁定扣费)
                 try:
                     sms_provider.finish_order(order.id)
                     finished_committed = True
@@ -3362,99 +3367,71 @@ def register_phone_and_fetch_bundle(
                 except Exception as exc:
                     logger.warning("[phone-reg] finish_order 失败(忽略): %s", exc)
 
-                # 等 OpenAI 后端同步账号 state(邮箱绑定传播到 identity / oauth /
-                # token 几个 service)— 用户手动等待 + 切窗口的自然延迟一般够,
-                # 60s 安全余量
-                logger.info("[phone-reg] sleep 60s 让 OpenAI 后端同步账号 state...")
-                time.sleep(60)
+                # 标记 resume 路径 — fetch_personal_bundle 必须在外层 with 退出后调,
+                # 不能在这里调(嵌套 sync_playwright → "Sync API inside asyncio loop")
+                do_resume_path = True
+                resume_phone_e164 = phone_e164
+                resume_bound_address_id = bound_address_id
+                # 不 return,fall through 让 with 自然退出
+            else:
+                # phase 1.5 失败(邮箱没绑成功)→ 走旧 phase 2 兜底
+                logger.info("[phone-reg] phase 1.5 失败,fallback phase 2 兜底")
 
-                # 走 resume 路径(email + password 登录 OAuth)— 这是 working 的
-                # 路径,跟点"继续认证"完全等价
-                logger.info(
-                    "[phone-reg] === Phase 2 改用 resume 路径(email login OAuth)=== email=%s",
-                    email,
+                # ─── Phase 1 → Phase 2 切换:重建 browser context ───
+                try:
+                    context.close()
+                    logger.info("[phone-reg] phase1 context 已关闭,phase2 用全新 context")
+                except Exception as exc:
+                    logger.warning("[phone-reg] 关 phase1 context 失败(继续): %s", exc)
+                context = browser.new_context(**get_context_options())
+                page = context.new_page()
+                page_ref[0] = page
+                _attach_capture_handlers(page)
+
+                # Phase 2: auth.openai.com OAuth — 用全新 context
+                email_bound = _phase2_oauth(
+                    page, auth_url, sms_provider, order, country, phone_e164,
+                    email_for_bind=email, mail_client=mail_client,
+                    password=password,
+                    capture_callback=_capture,
                 )
-                bundle = fetch_personal_bundle(
-                    email=email, password=password,
-                    mail_client=mail_client, session_token=None,
+
+                # callback 等满 30s 兜底
+                if not auth_code[0]:
+                    logger.info("[phone-reg] consent 后等 callback 最多 30s")
+                    deadline = time.time() + 30
+                    while time.time() < deadline and not auth_code[0]:
+                        _try_extract_code(page.url or "", "tail_url_poll")
+                        time.sleep(1)
+
+                if not auth_code[0]:
+                    safe_screenshot(page, SCREENSHOT_DIR / "phone_31_no_auth_code.png")
+                    raise OAuthFailed("Phase 2 完成但未捕获到 auth_code")
+
+                # 给 OpenAI 后端时间 finalize auth_code
+                time.sleep(1.5)
+
+                # 自己换 token(走代理保持 IP 一致)
+                bundle = _exchange_code(
+                    auth_code[0], code_verifier, fallback_email=email,
+                    proxies=_proxy_opts_to_requests(proxy_opts),
                 )
                 bundle["phone_verified"] = True
                 bundle["phone"] = phone_e164
-                bundle["email_bound"] = True
+                bundle["email_bound"] = bool(email_bound)
                 bundle["via_cpa"] = False
                 bundle["bound_address_id"] = bound_address_id
-                logger.info(
-                    "[phone-reg] ✅ 全流程成功(phase 1.5 + resume path)account_id=%s",
-                    bundle.get("account_id") or "",
-                )
+
+                # 提交订单(确认扣费)
+                try:
+                    sms_provider.finish_order(order.id)
+                    finished_committed = True
+                    logger.info("[phone-reg] ✅ 全流程成功,sms order=%d finish_order 提交",
+                                order.id)
+                except Exception as exc:
+                    logger.warning("[phone-reg] finish_order 失败(token 已拿到,不影响主流程): %s", exc)
+
                 return bundle
-
-            # phase 1.5 失败(邮箱没绑成功)→ 走旧 phase 2 兜底
-            logger.info("[phone-reg] phase 1.5 失败,fallback phase 2 兜底")
-
-            # ─── Phase 1 → Phase 2 切换:重建 browser context ───
-            # Phase1 注册 chatgpt.com 留下了 cookies / localStorage / IndexedDB / Service
-            # Worker / WebGL fingerprint cache 等大量 session 痕迹。即使清掉,OpenAI 后端
-            # 可能通过 IP + 浏览器指纹 仍能识别 → 出 picker shortcut → state 被重置 →
-            # CPA 回填 404。彻底解决:关闭 phase1 的 context,开全新的 context2,跟
-            # phase1 完全隔离,等同于"换浏览器"。
-            try:
-                context.close()
-                logger.info("[phone-reg] phase1 context 已关闭,phase2 用全新 context")
-            except Exception as exc:
-                logger.warning("[phone-reg] 关 phase1 context 失败(继续): %s", exc)
-            context = browser.new_context(**get_context_options())
-            page = context.new_page()
-            page_ref[0] = page
-            _attach_capture_handlers(page)
-
-            # Phase 2: auth.openai.com OAuth — 用全新 context
-            email_bound = _phase2_oauth(
-                page, auth_url, sms_provider, order, country, phone_e164,
-                email_for_bind=email, mail_client=mail_client,
-                password=password,
-                capture_callback=_capture,
-            )
-
-            # callback 等满 30s 兜底
-            if not auth_code[0]:
-                logger.info("[phone-reg] consent 后等 callback 最多 30s")
-                deadline = time.time() + 30
-                while time.time() < deadline and not auth_code[0]:
-                    _try_extract_code(page.url or "", "tail_url_poll")
-                    time.sleep(1)
-
-            if not auth_code[0]:
-                safe_screenshot(page, SCREENSHOT_DIR / "phone_31_no_auth_code.png")
-                raise OAuthFailed("Phase 2 完成但未捕获到 auth_code")
-
-            # 给 OpenAI 后端时间 finalize auth_code
-            time.sleep(1.5)
-
-            # 自己换 token(verifier 在我们手里,跟 CPA state 无关)
-            # token 交换走跟浏览器同一个代理 — OpenAI 校验 IP 一致性
-            bundle = _exchange_code(
-                auth_code[0], code_verifier, fallback_email=email,
-                proxies=_proxy_opts_to_requests(proxy_opts),
-            )
-            bundle["phone_verified"] = True
-            bundle["phone"] = phone_e164
-            bundle["email_bound"] = bool(email_bound)
-            bundle["via_cpa"] = False
-            # phase 1.5 若换过邮箱,把新 address_id 带给 batch.py,让它更新本地状态
-            # (老 address_id 已在 phase 1.5 内被删,batch 拿了新的才能 reauth)
-            bundle["bound_address_id"] = bound_address_id
-
-            # 提交订单(确认扣费)
-            try:
-                sms_provider.finish_order(order.id)
-                finished_committed = True
-                logger.info("[phone-reg] ✅ 全流程成功,sms order=%d finish_order 提交",
-                            order.id)
-            except Exception as exc:
-                logger.warning("[phone-reg] finish_order 失败(token 已拿到,不影响主流程): %s", exc)
-
-            return bundle
 
         except (RegisterBlocked, RegisterFailed, OAuthFailed) as exc:
             # 已知错误 — 退款(SMS 没成功消费就退,成功消费但 OAuth 失败就 cancel)
@@ -3504,3 +3481,53 @@ def register_phone_and_fetch_bundle(
                 browser.close()
             except Exception:
                 pass
+
+    # ─── 顶层 with(sync_playwright)已退出 — 这里跑 resume 路径 ───
+    # phase 1.5 走完整 OAuth + 绑邮箱后,账号 state 还在 OpenAI 后端传播,
+    # 立即换 token 会撞 token_exchange_user_error。等价于点"继续认证"的全自动版:
+    # 关 phase 1 browser → sleep 60s → fetch_personal_bundle(开新 browser
+    # 用 email+password 登录 OAuth → 跳过 /add-email → 换 token → ✅)
+    if do_resume_path:
+        logger.info("[phone-reg] sleep 60s 让 OpenAI 后端同步账号 state...")
+        time.sleep(60)
+        logger.info(
+            "[phone-reg] === Phase 2 改用 resume 路径(email login OAuth)=== email=%s",
+            email,
+        )
+        try:
+            bundle = fetch_personal_bundle(
+                email=email, password=password,
+                mail_client=mail_client, session_token=None,
+            )
+        except (RegisterBlocked, RegisterFailed, OAuthFailed) as exc:
+            # SMS 已 finish_order(钱花了),resume 路径任何失败都算"已付费 oauth_failed"
+            try:
+                exc.phone_e164 = resume_phone_e164  # type: ignore[attr-defined]
+                exc.bound_email = email  # type: ignore[attr-defined]
+                exc.bound_address_id = resume_bound_address_id  # type: ignore[attr-defined]
+                exc.phone_paid_via_sms = True  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            raise
+        except Exception as exc:
+            logger.exception("[phone-reg] resume 路径未预期异常")
+            new_exc = OAuthFailed(f"resume 路径未预期异常: {exc}")
+            new_exc.phone_e164 = resume_phone_e164  # type: ignore[attr-defined]
+            new_exc.bound_email = email  # type: ignore[attr-defined]
+            new_exc.bound_address_id = resume_bound_address_id  # type: ignore[attr-defined]
+            new_exc.phone_paid_via_sms = True  # type: ignore[attr-defined]
+            raise new_exc from exc
+
+        bundle["phone_verified"] = True
+        bundle["phone"] = resume_phone_e164
+        bundle["email_bound"] = True
+        bundle["via_cpa"] = False
+        bundle["bound_address_id"] = resume_bound_address_id
+        logger.info(
+            "[phone-reg] ✅ 全流程成功(phase 1.5 + resume path)account_id=%s",
+            bundle.get("account_id") or "",
+        )
+        return bundle
+
+    # 理论上 unreachable — phase 1.5 失败时 phase 2 内部直接 return bundle 或 raise
+    raise OAuthFailed("phone-reg 流程结束但未取到 bundle(unreachable)")
