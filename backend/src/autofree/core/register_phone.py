@@ -2557,7 +2557,48 @@ def _phase15_bind_email(
             last_url = url
             continue
 
-        # 6) consent 页面(OAuth 完整流程会经过)→ 点 Allow/Continue
+        # 6) /choose-an-account picker — phase 1 cookies 留下了账号,OAuth 看到自动出 picker
+        # 抄 phase 2 的 picker handler:点已有账号卡片继续当前 OAuth(state 保留)
+        if "choose-an-account" in url_low or "account-picker" in url_low or "Welcome back" in (body_text or ""):
+            logger.warning(
+                "[phone-reg] phase1.5 r%d Account picker — 点已有账号卡片继续 OAuth",
+                round_idx,
+            )
+            try:
+                clicked = page.evaluate(
+                    """() => {
+                        const skip = ['log in to another', 'use another', 'use a different',
+                                      'sign in to another', '另一个账号', '其他账号', '换个账号',
+                                      'create account', '创建账号', 'log out', '登出', 'sign up',
+                                      'terms of use', 'privacy policy', '使用条款', '隐私政策'];
+                        const cands = document.querySelectorAll(
+                            'button, a, li, div[role="button"], [data-testid]'
+                        );
+                        for (const el of cands) {
+                            const r = el.getBoundingClientRect();
+                            if (r.width <= 0 || r.height <= 0) continue;
+                            const t = (el.innerText || '').trim().toLowerCase();
+                            if (!t || t.length > 200) continue;
+                            if (skip.some(s => t.includes(s))) continue;
+                            if (t.includes('@') || /\\+\\d{1,4}/.test(t)) {
+                                el.scrollIntoView({ block: 'center' });
+                                el.click();
+                                return t.slice(0, 80);
+                            }
+                        }
+                        return null;
+                    }"""
+                )
+                if clicked:
+                    logger.info("[phone-reg] phase1.5 picker 点中: %r", clicked)
+                    _sleep(3)
+                    last_url = url
+                    continue
+                logger.warning("[phone-reg] phase1.5 picker 没找到账号卡片")
+            except Exception as exc:
+                logger.warning("[phone-reg] phase1.5 picker 处理异常: %s", exc)
+
+        # 7) consent 页面(OAuth 完整流程会经过)→ 点 Allow/Continue
         # 邮件验证完后 OAuth 通常直接跳 callback,但有些账号会先过 consent
         if "/consent" in url_low or "/authorize" in url_low:
             logger.info("[phone-reg] phase1.5 r%d consent 页 — 点 Allow", round_idx)
