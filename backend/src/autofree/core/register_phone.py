@@ -2558,19 +2558,25 @@ def _phase15_bind_email(
             continue
 
         # 6) /choose-an-account picker — phase 1 cookies 留下了账号,OAuth 看到自动出 picker
-        # 抄 phase 2 的 picker handler:点已有账号卡片继续当前 OAuth(state 保留)
+        # JS 找卡片打 marker → Playwright 真点击(isTrusted=true)
+        # 之前用 el.click() 是合成事件,React picker UI 不响应,卡 picker 死循环
         if "choose-an-account" in url_low or "account-picker" in url_low or "Welcome back" in (body_text or ""):
             logger.warning(
-                "[phone-reg] phase1.5 r%d Account picker — 点已有账号卡片继续 OAuth",
+                "[phone-reg] phase1.5 r%d Account picker — 找卡片真点击",
                 round_idx,
             )
             try:
-                clicked = page.evaluate(
+                # Step 1: JS 找含 @ 或 +<digits> 的卡片元素,打 marker(不点击)
+                marked_text = page.evaluate(
                     """() => {
                         const skip = ['log in to another', 'use another', 'use a different',
                                       'sign in to another', '另一个账号', '其他账号', '换个账号',
                                       'create account', '创建账号', 'log out', '登出', 'sign up',
                                       'terms of use', 'privacy policy', '使用条款', '隐私政策'];
+                        // 清掉上轮可能留下的 marker
+                        document.querySelectorAll('[data-autofree-picker]').forEach(
+                            el => el.removeAttribute('data-autofree-picker')
+                        );
                         const cands = document.querySelectorAll(
                             'button, a, li, div[role="button"], [data-testid]'
                         );
@@ -2582,19 +2588,38 @@ def _phase15_bind_email(
                             if (skip.some(s => t.includes(s))) continue;
                             if (t.includes('@') || /\\+\\d{1,4}/.test(t)) {
                                 el.scrollIntoView({ block: 'center' });
-                                el.click();
+                                el.setAttribute('data-autofree-picker', '1');
                                 return t.slice(0, 80);
                             }
                         }
                         return null;
                     }"""
                 )
-                if clicked:
-                    logger.info("[phone-reg] phase1.5 picker 点中: %r", clicked)
-                    _sleep(3)
-                    last_url = url
-                    continue
-                logger.warning("[phone-reg] phase1.5 picker 没找到账号卡片")
+                if marked_text:
+                    # Step 2: Playwright 真点击 marker(CDP → isTrusted=true)
+                    try:
+                        page.locator('[data-autofree-picker="1"]').first.click(timeout=8000)
+                        logger.info("[phone-reg] phase1.5 picker 真点击: %r", marked_text)
+                        _sleep(4)
+                        last_url = url
+                        continue
+                    except Exception as click_exc:
+                        logger.warning(
+                            "[phone-reg] phase1.5 picker 真点击失败(%s)— 兜底 dispatchEvent",
+                            click_exc,
+                        )
+                        # 兜底:真点击不行就用合成事件试一下(大概率也不行,但记一笔)
+                        page.evaluate(
+                            "() => document.querySelector('[data-autofree-picker=\"1\"]')?.click()"
+                        )
+                        _sleep(3)
+                        last_url = url
+                        continue
+                else:
+                    logger.warning("[phone-reg] phase1.5 picker 没找到账号卡片")
+                    safe_screenshot(
+                        page, SCREENSHOT_DIR / f"phone_15_picker_no_card_r{round_idx:02d}.png",
+                    )
             except Exception as exc:
                 logger.warning("[phone-reg] phase1.5 picker 处理异常: %s", exc)
 
