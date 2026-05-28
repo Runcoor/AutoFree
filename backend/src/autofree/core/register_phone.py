@@ -3338,8 +3338,11 @@ def register_phone_and_fetch_bundle(
                     "[phone-reg] ✅ 抓到 auth_code (phase15_ok=%s),跳过 phase 2 直接换 token",
                     phase15_ok,
                 )
-                # 给 OpenAI 后端时间 finalize auth_code(跟手动粘贴 CPA 的人肉延迟等价)
-                time.sleep(2)
+                # 给 OpenAI 后端时间 finalize auth_code — 手动粘贴 CPA 之间用户
+                # 切窗口/复制/粘贴的自然延迟一般 10~30s。先睡 10s 模拟,_exchange_code
+                # 内部还有 7 次重试(最长 105s)兜底。
+                logger.info("[phone-reg] 等 10s 让 OpenAI 后端 finalize 账号 state...")
+                time.sleep(10)
                 bundle = _exchange_code(auth_code[0], code_verifier, fallback_email=email)
                 bundle["phone_verified"] = True
                 bundle["phone"] = phone_e164
