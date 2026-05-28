@@ -88,7 +88,41 @@ def _decode_jwt_payload(token: str) -> dict:
         return {}
 
 
-def _exchange_code(auth_code: str, code_verifier: str, fallback_email: str) -> dict:
+def _proxy_opts_to_requests(proxy_opts: dict | None) -> dict | None:
+    """Playwright proxy dict → requests proxies dict。
+
+    Playwright: {"server": "http://h:p", "username": "...", "password": "..."}
+    Requests:   {"http": "http://user:pwd@h:p", "https": "..."}
+
+    用于 _exchange_code 把 token 交换走跟浏览器同一个出口 IP — OpenAI 校验
+    code 颁发 IP 与 token 交换 IP 一致,否则返 token_exchange_user_error。
+    """
+    if not proxy_opts:
+        return None
+    server = (proxy_opts.get("server") or "").strip()
+    if not server:
+        return None
+    user = proxy_opts.get("username", "")
+    pwd = proxy_opts.get("password", "")
+    if "://" in server:
+        scheme, rest = server.split("://", 1)
+    else:
+        scheme, rest = "http", server
+    if user and pwd:
+        auth = f"{urllib.parse.quote(user, safe='')}:{urllib.parse.quote(pwd, safe='')}@"
+    else:
+        auth = ""
+    proxy_url = f"{scheme}://{auth}{rest}"
+    return {"http": proxy_url, "https": proxy_url}
+
+
+def _exchange_code(
+    auth_code: str,
+    code_verifier: str,
+    fallback_email: str,
+    *,
+    proxies: dict | None = None,
+) -> dict:
     """code → bundle dict。
 
     OpenAI 偶尔在 auth_code 刚生成、还没在 OAuth 后端完全 finalize 时收到 exchange
@@ -122,6 +156,7 @@ def _exchange_code(auth_code: str, code_verifier: str, fallback_email: str) -> d
                 },
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 timeout=30,
+                proxies=proxies,
             )
         except Exception as exc:
             last_err = f"网络异常: {exc}"

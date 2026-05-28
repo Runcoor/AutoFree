@@ -49,6 +49,7 @@ from autofree.core.oauth import (
     _build_auth_url,
     _exchange_code,
     _pkce,
+    _proxy_opts_to_requests,
     assert_account_alive,
 )
 from autofree.core.phone_country import PhoneCountry, from_sms_slug, strip_dial_prefix
@@ -3343,7 +3344,12 @@ def register_phone_and_fetch_bundle(
                 # 内部还有 7 次重试(最长 105s)兜底。
                 logger.info("[phone-reg] 等 10s 让 OpenAI 后端 finalize 账号 state...")
                 time.sleep(10)
-                bundle = _exchange_code(auth_code[0], code_verifier, fallback_email=email)
+                # 关键:token 交换必须走跟浏览器同一个代理(同 IP),否则 OpenAI
+                # 校验"code 颁发 IP ≠ token 交换 IP"返 token_exchange_user_error
+                bundle = _exchange_code(
+                    auth_code[0], code_verifier, fallback_email=email,
+                    proxies=_proxy_opts_to_requests(proxy_opts),
+                )
                 bundle["phone_verified"] = True
                 bundle["phone"] = phone_e164
                 bundle["email_bound"] = True
@@ -3406,7 +3412,11 @@ def register_phone_and_fetch_bundle(
             time.sleep(1.5)
 
             # 自己换 token(verifier 在我们手里,跟 CPA state 无关)
-            bundle = _exchange_code(auth_code[0], code_verifier, fallback_email=email)
+            # token 交换走跟浏览器同一个代理 — OpenAI 校验 IP 一致性
+            bundle = _exchange_code(
+                auth_code[0], code_verifier, fallback_email=email,
+                proxies=_proxy_opts_to_requests(proxy_opts),
+            )
             bundle["phone_verified"] = True
             bundle["phone"] = phone_e164
             bundle["email_bound"] = bool(email_bound)
