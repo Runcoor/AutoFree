@@ -1334,6 +1334,8 @@ def _phase1_signup(
     password: str,
     full_name: str,
     birth: dict[str, str],
+    *,
+    sms1_consumed: list[bool] | None = None,
 ) -> tuple[Any, str]:
     """完成 chatgpt.com 手机号注册。返回 (sms_order, phone_e164)。
 
@@ -1789,6 +1791,9 @@ def _phase1_signup(
             continue
 
         # 成功:进入密码/about-you/主页阶段。这里 order 保留(还要 phase2 再用一次 SMS)
+        # SMS#1 已消费 → 钱已付,后续任何失败都该标 💰 让用户能"手动添加"恢复
+        if sms1_consumed is not None:
+            sms1_consumed[0] = True
         logger.info("[phone-reg] ✅ Phase 1 SMS#1 验证通过 order=%d", order.id)
         safe_screenshot(page, SCREENSHOT_DIR / "phone_08_after_sms.png")
         break
@@ -3246,6 +3251,10 @@ def register_phone_and_fetch_bundle(
     order = None
     phone_e164 = ""
     finished_committed = False
+    # SMS#1 是否已消费(=钱已付) — _phase1_signup 在 SMS#1 验证通过后把 [0] 标 True。
+    # 任何后续失败(包括 phase 1 主循环的 RegisterBlocked / RegisterFailed)都该挂
+    # phone_paid_via_sms=True,让 batch 标 💰 + 写 pending,用户能手动添加恢复。
+    sms1_consumed: list[bool] = [False]
     # phase 1.5 成功后,改走 resume 路径(fetch_personal_bundle)的标记 — 必须在
     # 顶层 sync_playwright() with 块退出后才能调,否则嵌套 sync_playwright 报错。
     do_resume_path = False
@@ -3297,6 +3306,7 @@ def register_phone_and_fetch_bundle(
             # Phase 1: chatgpt.com 手机号注册
             order, phone_e164 = _phase1_signup(
                 page, sms_provider, sms_cfg, country, password, full_name, birth,
+                sms1_consumed=sms1_consumed,
             )
 
             # Phase 1.5: 走完整 OAuth(同 phase 2 的 auth_url) — 绑邮箱 + 拿 callback code
@@ -3434,32 +3444,28 @@ def register_phone_and_fetch_bundle(
                 return bundle
 
         except (RegisterBlocked, RegisterFailed, OAuthFailed) as exc:
-            # 已知错误 — 退款(SMS 没成功消费就退,成功消费但 OAuth 失败就 cancel)
-            # 不论成败,把 phone_e164 / phase1.5 换过的邮箱挂到异常上,让 batch.py 写 pending
+            # 已知错误 — 退款(SMS 没成功消费就退,成功消费就 cancel)
+            # 不论成败,把 phone_e164 / 邮箱挂到异常上,让 batch.py 写 pending
             try:
                 exc.phone_e164 = phone_e164  # type: ignore[attr-defined]
-                # phase 1.5 失败也可能换过邮箱(老的已删) — 让 batch 用新的写 pending
                 if "email" in locals():
                     exc.bound_email = email  # type: ignore[attr-defined]
                 if "bound_address_id" in locals():
                     exc.bound_address_id = bound_address_id  # type: ignore[attr-defined]
-                # SMS 已 finish_order(phase 1.5 path 提前 commit)→ 钱已付,
-                # 后续 fetch_personal_bundle 任何失败都算"已付费 oauth_failed"
-                if finished_committed:
+                # 任何 SMS#1 已消费的失败(已注册号 / SMS#2 超时 / SMS code 填写
+                # 失败 / Phase 1 资料超时 / phase 1.5 / phase 2 ...)都该标
+                # phone_paid_via_sms — 钱真的花了,让 batch UI 显示 💰 + 写 pending
+                # email/password/phone,用户能手动 "继续认证" 恢复。
+                if finished_committed or sms1_consumed[0]:
                     exc.phone_paid_via_sms = True  # type: ignore[attr-defined]
             except Exception:
                 pass
             if order is not None and not finished_committed:
-                if isinstance(exc, OAuthFailed):
-                    # Phase 2 失败:SMS#1 已消费(Phase 1 用过) → cancel 试图退,但
-                    # 2 分钟外通常已不退款 → 视为「已付费」,batch.py 据此把 pending 标 💰
+                if sms1_consumed[0] or isinstance(exc, OAuthFailed):
+                    # SMS#1 已消费 → cancel(试图退,2 分钟外通常不退)
                     _safe_refund(sms_provider, order, "cancel")
-                    try:
-                        exc.phone_paid_via_sms = True  # type: ignore[attr-defined]
-                    except Exception:
-                        pass
                 else:
-                    # Phase 1 失败:SMS 未必消费过 → ban(全退 + 不再分同号),不标 💰
+                    # SMS#1 没消费过(买号失败 / 买完没填 OTP) → ban(全退 + 不再分同号)
                     _safe_refund(sms_provider, order, "ban")
             raise
         except BatchStopped:
@@ -3474,8 +3480,20 @@ def register_phone_and_fetch_bundle(
         except Exception as exc:
             logger.exception("[phone-reg] 未预期异常")
             if order is not None and not finished_committed:
-                _safe_refund(sms_provider, order, "ban")
-            raise OAuthFailed(f"phone-reg 未预期异常: {exc}") from exc
+                _safe_refund(
+                    sms_provider, order,
+                    "cancel" if sms1_consumed[0] else "ban",
+                )
+            new_exc = OAuthFailed(f"phone-reg 未预期异常: {exc}")
+            try:
+                new_exc.phone_e164 = phone_e164  # type: ignore[attr-defined]
+                if "email" in locals():
+                    new_exc.bound_email = email  # type: ignore[attr-defined]
+                if finished_committed or sms1_consumed[0]:
+                    new_exc.phone_paid_via_sms = True  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            raise new_exc from exc
         finally:
             try:
                 browser.close()
